@@ -6,6 +6,7 @@ import {
   GizmoViewport,
   OrthographicCamera,
   PerspectiveCamera,
+  Html,
   useGLTF,
 } from "@react-three/drei";
 import { useCallback, useRef, useState, useEffect, useMemo, Suspense, useLayoutEffect } from "react";
@@ -43,7 +44,9 @@ import {
   resizeEnvelopeOf,
   bestPartForSize,
   clampToSupportLength,
+  orientationForSize,
   placedPartBounds,
+  IDENTITY_ROTATION,
   MAX_SUPPORT_LENGTH,
 } from "../assembly/part-sizing";
 import { resolveDraw } from "../assembly/draw";
@@ -503,9 +506,41 @@ function DrawSpanGhost({ position, size }: { position: GridPosition; size: [numb
  * While a resize is in flight, show what the part will become: the catalog part
  * that fills the dragged length, keeping its current definition when none does.
  */
-function previewDefinitionId(part: PlacedPart, size: [number, number, number]): string {
-  const match = bestPartForSize(clampToSupportLength(size), getPartDefinition(part.definitionId)?.category);
-  return match ? match.id : part.definitionId;
+function previewPart(part: PlacedPart, preview: ResizePreview): PlacedPart {
+  const capped = clampToSupportLength(preview.size);
+  const match = bestPartForSize(capped, getPartDefinition(part.definitionId)?.category);
+  return {
+    ...part,
+    position: preview.position,
+    definitionId: match ? match.id : part.definitionId,
+    // The orientation has to follow too. Keeping the old one drew the bar along the
+    // axis it used to run, so a drag that re-aimed it left the mesh behind.
+    orientation: match ? orientationForSize(match, capped) : part.orientation,
+    rotation: match ? IDENTITY_ROTATION : part.rotation,
+  };
+}
+
+/**
+ * Length of the bar being resized or selected, in cube units and centimetres. Pinned
+ * to the bar rather than the corner of the screen, so it is where the eye already is.
+ * pointerEvents stays off: R3F raycasts through the container this sits in, and a
+ * label that swallowed clicks would break selecting the part underneath.
+ */
+function DimensionLabel({ min, size }: { min: GridPosition; size: [number, number, number] }) {
+  const cells = Math.max(size[0], size[1], size[2]);
+  const centre = gridToWorld([min[0] + (size[0] - 1) / 2, min[1] + (size[1] - 1) / 2, min[2] + (size[2] - 1) / 2]);
+  return (
+    <Html
+      position={[centre[0], centre[1] + BASE_UNIT * 0.9, centre[2]]}
+      center
+      zIndexRange={[15, 10]}
+      style={{ pointerEvents: "none" }}
+    >
+      <span className="dimension-label">
+        {cells}u · {((cells * BASE_UNIT) / 10).toFixed(1)} cm
+      </span>
+    </Html>
+  );
 }
 
 /**
@@ -1703,6 +1738,8 @@ interface SceneProps extends ViewportProps {
   onPartPointerDown: (instanceId: string, nativeEvent: PointerEvent, hit?: THREE.Vector3) => void;
   verticalDragRef: React.MutableRefObject<{ active: boolean; used: boolean; y: number }>;
   pressOriginRef: React.MutableRefObject<{ x: number; y: number } | null>;
+  hoveredPartId: string | null;
+  onHoverPart: (instanceId: string | null) => void;
   light: LightSettings;
   yLift: number;
   boxSelectActive: boolean;
@@ -1735,6 +1772,8 @@ function Scene({
   onPartPointerDown,
   verticalDragRef,
   pressOriginRef,
+  hoveredPartId,
+  onHoverPart,
   light,
   yLift,
   flashPartId,
@@ -1845,6 +1884,18 @@ function Scene({
     return out;
   }, [parts, selectedPartIds, dragState]);
 
+  // Live while resizing, otherwise whatever the cursor is over. Only bars get one —
+  // "1u" on a connector would be noise.
+  const dimensionBox = useMemo(() => {
+    if (resizePreview) return { min: resizePreview.position, size: resizePreview.size };
+    if (!hoveredPartId) return null;
+    const part = parts.find((p) => p.instanceId === hoveredPartId);
+    if (!part) return null;
+    const bounds = placedPartBounds(part);
+    if (!bounds || Math.max(...bounds.size) <= 1) return null;
+    return bounds;
+  }, [resizePreview, hoveredPartId, parts]);
+
   const sceneDrawAxis: DrawAxis = mode.type === "draw" ? mode.axis : "horizontal";
   const drawSpan = drawDrag ? computeDrawSpan(drawDrag.start, drawDrag.current, sceneDrawAxis) : null;
   // Preview the settled placement, not the raw span — same resolver as the commit
@@ -1925,6 +1976,8 @@ function Scene({
         infiniteGrid
       />
 
+      {dimensionBox && <DimensionLabel min={dimensionBox.min} size={dimensionBox.size} />}
+
       {heightGuides.map((g) => (
         <HeightGuides key={g.id} min={g.min} size={g.size} />
       ))}
@@ -1962,20 +2015,29 @@ function Scene({
       {/* Placed parts */}
       {parts.map((part) => {
         const preview = resizePreview && resizePreview.instanceId === part.instanceId ? resizePreview : null;
-        const renderPart: PlacedPart = preview
-          ? { ...part, definitionId: previewDefinitionId(part, preview.size), position: preview.position }
-          : part;
+        const renderPart: PlacedPart = preview ? previewPart(part, preview) : part;
         return (
-          <PartMesh
+          <group
             key={part.instanceId}
-            part={renderPart}
-            isSelected={selectedPartIds.has(part.instanceId)}
-            isDragging={dragState?.instanceId === part.instanceId}
-            isPlacing={mode.type === "place" || mode.type === "draw"}
-            isFlashing={flashPartId === part.instanceId || flashDefinitionId === part.definitionId}
-            isColliding={collidingPartIds.has(part.instanceId)}
-            onPointerDown={(e) => onPartPointerDown(part.instanceId, e.nativeEvent, e.point)}
-          />
+            onPointerOver={(e) => {
+              e.stopPropagation();
+              onHoverPart(part.instanceId);
+            }}
+            onPointerOut={(e) => {
+              e.stopPropagation();
+              onHoverPart(null);
+            }}
+          >
+            <PartMesh
+              part={renderPart}
+              isSelected={selectedPartIds.has(part.instanceId)}
+              isDragging={dragState?.instanceId === part.instanceId}
+              isPlacing={mode.type === "place" || mode.type === "draw"}
+              isFlashing={flashPartId === part.instanceId || flashDefinitionId === part.definitionId}
+              isColliding={collidingPartIds.has(part.instanceId)}
+              onPointerDown={(e) => onPartPointerDown(part.instanceId, e.nativeEvent, e.point)}
+            />
+          </group>
         );
       })}
 
@@ -2116,6 +2178,9 @@ export function ViewportCanvas(props: ViewportProps) {
 
   /** Where the current press started, for telling clicks from camera drags */
   const pressOriginRef = useRef<{ x: number; y: number } | null>(null);
+
+  /** Part under the cursor, so its length can be read without selecting it */
+  const [hoveredPartId, setHoveredPartId] = useState<string | null>(null);
 
   const pendingDragRef = useRef<{
     instanceId: string;
@@ -2701,6 +2766,8 @@ export function ViewportCanvas(props: ViewportProps) {
           onPartPointerDown={handlePartPointerDown}
           verticalDragRef={verticalDragRef}
           pressOriginRef={pressOriginRef}
+          hoveredPartId={hoveredPartId}
+          onHoverPart={setHoveredPartId}
           light={light}
           yLift={yLift}
           boxSelectActive={!!boxSelectRect}

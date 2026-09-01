@@ -1169,3 +1169,17 @@
   line-height: 1.4;
   color: var(--text-secondary);
 }
+
+.dimension-label {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(22, 33, 62, 0.92);
+  border: 1px solid var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}

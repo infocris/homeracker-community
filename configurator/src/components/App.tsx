@@ -751,8 +751,11 @@ export function App() {
     const newDefId = target.id;
     const newOrientation = orientationForSize(target, capped);
 
+    // Orientation belongs in this comparison: re-aiming a bar keeps its definition and
+    // its min corner, so leaving it out made a pure rotation look like a no-op.
     if (
       before.definitionId === newDefId &&
+      before.orientation === newOrientation &&
       before.position[0] === position[0] &&
       before.position[1] === position[1] &&
       before.position[2] === position[2]
