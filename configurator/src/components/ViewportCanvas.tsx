@@ -556,6 +556,53 @@ const AXIS_RING_AXIS = ["x", "y", "z"];
  * sits at 45° in its own ring's plane, in a direction the other two rings do not pass
  * through, so the three badges stay apart whatever the camera does.
  */
+/** The arrows that move a selection across the ground. */
+const ARROW_KEYS = new Set(["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"]);
+
+type GroundStep = [number, number, number];
+
+/**
+ * What the four arrows mean on the ground, seen from where the camera stands.
+ *
+ * Fixed axes per key meant the same press walked a part left or right depending on
+ * which side the camera happened to be on. The arrows should mean what they look like.
+ *
+ * The two pairs are decided together, not key by key. Scoring each key on its own looks
+ * reasonable until the camera sits at 45°, where both axes score alike for "right" and
+ * the tie can break one way for right and the other for left — leaving the two keys on
+ * different axes, so pressing one then the other does not come back. Choosing the axis
+ * once and taking its opposite for the other key cannot do that. Height stays on w/s,
+ * which needs no such help.
+ */
+function arrowGroundSteps(camera: THREE.Camera, around: THREE.Vector3): Record<string, GroundStep> {
+  const from = around.clone().project(camera);
+  /** Screen movement of one cell along a ground axis, in NDC */
+  const screenDelta = (step: GroundStep) => {
+    const to = around
+      .clone()
+      .add(new THREE.Vector3(step[0] * BASE_UNIT, 0, step[2] * BASE_UNIT))
+      .project(camera);
+    return { x: to.x - from.x, y: to.y - from.y };
+  };
+
+  const alongX: GroundStep = [1, 0, 0];
+  const alongZ: GroundStep = [0, 0, 1];
+  const dx = screenDelta(alongX);
+  const dz = screenDelta(alongZ);
+
+  // Whichever axis runs more sideways on screen carries left and right
+  const sideways = Math.abs(dx.x) >= Math.abs(dz.x) ? { axis: alongX, delta: dx } : { axis: alongZ, delta: dz };
+  const away = sideways.axis === alongX ? { axis: alongZ, delta: dz } : { axis: alongX, delta: dx };
+
+  const signed = (step: GroundStep, positive: boolean): GroundStep =>
+    positive ? step : [-step[0], -step[1], -step[2]];
+
+  const right = signed(sideways.axis, sideways.delta.x >= 0);
+  const up = signed(away.axis, away.delta.y >= 0);
+
+  return { ArrowRight: right, ArrowLeft: signed(right, false), ArrowUp: up, ArrowDown: signed(up, false) };
+}
+
 /** A cell and its six face neighbours: what counts as touching the selection. */
 const TOUCHING_CELLS: [number, number, number][] = [
   [0, 0, 0],
@@ -3067,23 +3114,17 @@ export function ViewportCanvas(props: ViewportProps) {
       } else if (props.mode.type === "select" && props.selectedPartIds.size > 0) {
         // Arrow key nudge, W/S lift, and R/T/F/O rotation for selected parts
         const fine = e.shiftKey ? 0.05 : 1;
+        if (ARROW_KEYS.has(e.key)) {
+          e.preventDefault();
+          // Same route to the camera the box-select projection already takes
+          const camera = (window as any).__camera as THREE.Camera | undefined;
+          const orbit = (window as any).__controls as { target?: THREE.Vector3 } | undefined;
+          const around = orbit?.target?.clone() ?? new THREE.Vector3();
+          const step = camera ? arrowGroundSteps(camera, around)[e.key] : undefined;
+          if (step) props.onNudgeParts(step[0] * fine, step[1] * fine, step[2] * fine);
+          return;
+        }
         switch (e.key) {
-          case "ArrowLeft":
-            e.preventDefault();
-            props.onNudgeParts(-fine, 0, 0);
-            break;
-          case "ArrowRight":
-            e.preventDefault();
-            props.onNudgeParts(fine, 0, 0);
-            break;
-          case "ArrowUp":
-            e.preventDefault();
-            props.onNudgeParts(0, 0, -fine);
-            break;
-          case "ArrowDown":
-            e.preventDefault();
-            props.onNudgeParts(0, 0, fine);
-            break;
           case "w":
           case "W":
             props.onNudgeParts(0, fine, 0);
