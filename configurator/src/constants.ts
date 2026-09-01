@@ -28,6 +28,12 @@ export const RACK_UNIT_HEIGHT = 44.45;
 /** Number of grid cells visible in each direction from origin */
 export const GRID_EXTENT = 20;
 
+/** Half-width of the buildable area, in cells from the origin on X and Z */
+export const WORKSPACE_EXTENT = GRID_EXTENT;
+
+/** Ceiling of the buildable area, in cells above the ground */
+export const WORKSPACE_HEIGHT = GRID_EXTENT * 2;
+
 /** Grid line color */
 export const GRID_COLOR = "#444444";
 

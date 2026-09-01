@@ -13,10 +13,17 @@ interface ToolbarProps {
   mode: InteractionMode;
   snapEnabled: boolean;
   onToggleSnap: () => void;
+  gravityEnabled: boolean;
+  onToggleGravity: () => void;
   showCollisions: boolean;
   onToggleCollisions: () => void;
   fineMeshCollisions: boolean;
   onToggleFineMesh: () => void;
+  /** Connectors in the selection, and whether they are already released */
+  lockSelection: { count: number; unlocked: boolean } | null;
+  onToggleLock: () => void;
+  /** Absent while there is nothing placed to centre */
+  onCentre?: () => void;
 }
 
 export function Toolbar({
@@ -32,10 +39,15 @@ export function Toolbar({
   mode,
   snapEnabled,
   onToggleSnap,
+  gravityEnabled,
+  onToggleGravity,
   showCollisions,
   onToggleCollisions,
   fineMeshCollisions,
   onToggleFineMesh,
+  lockSelection,
+  onToggleLock,
+  onCentre,
 }: ToolbarProps) {
   return (
     <div className="toolbar">
@@ -52,6 +64,29 @@ export function Toolbar({
         {onDelete && (
           <button className="toolbar-btn toolbar-btn-danger" onClick={onDelete} title="Delete selected (Del)">
             Delete{selectedCount > 1 ? ` (${selectedCount})` : ""}
+          </button>
+        )}
+        {lockSelection && (
+          <button
+            className={`toolbar-btn${lockSelection.unlocked ? " toolbar-btn-active" : ""}`}
+            onClick={onToggleLock}
+            title={
+              lockSelection.unlocked
+                ? "Hold the selected connector in place again"
+                : "Release the selected connector so it can be dragged"
+            }
+          >
+            {lockSelection.unlocked ? "Unlocked" : "Locked"}
+            {lockSelection.count > 1 ? ` (${lockSelection.count})` : ""}
+          </button>
+        )}
+        {onCentre && (
+          <button
+            className="toolbar-btn"
+            onClick={onCentre}
+            title="Slide the assembly to the middle of the buildable area"
+          >
+            Center
           </button>
         )}
         <button className="toolbar-btn toolbar-btn-danger" onClick={onClear} title="Clear all parts">
@@ -80,6 +115,13 @@ export function Toolbar({
           Snap: {snapEnabled ? "On" : "Off"}
         </button>
         <button
+          className={`toolbar-btn${!gravityEnabled ? " toolbar-btn-active" : ""}`}
+          onClick={onToggleGravity}
+          title="Parts rest on what is below them, and fall to the ground when nothing is"
+        >
+          Gravity: {gravityEnabled ? "On" : "Off"}
+        </button>
+        <button
           className={`toolbar-btn${showCollisions ? " toolbar-btn-active" : ""}`}
           onClick={onToggleCollisions}
           title="Highlight overlapping/colliding parts"
@@ -100,6 +142,15 @@ export function Toolbar({
       {mode.type === "place" && (
         <div className="toolbar-group">
           <span className="toolbar-mode-label">Placing: {mode.definitionId}</span>
+          <button className="toolbar-btn" onClick={onEscape}>
+            Cancel (Esc)
+          </button>
+        </div>
+      )}
+
+      {mode.type === "draw" && (
+        <div className="toolbar-group">
+          <span className="toolbar-mode-label">Drawing {mode.axis === "vertical" ? "upright" : "flat"} (1×1×N)</span>
           <button className="toolbar-btn" onClick={onEscape}>
             Cancel (Esc)
           </button>

@@ -4,6 +4,11 @@ export default defineConfig({
 	testDir: "./e2e",
 	timeout: 30_000,
 	retries: 0,
+	// Two, not the default four: WebGL runs on swiftshader here, so each page spends
+	// ~4.7s compiling shaders before it can be driven. Four workers contend for the
+	// CPU badly enough that startup gates expire — and a longer gate makes it worse,
+	// since a stalled worker then holds the CPU longer.
+	workers: 2,
 	use: {
 		baseURL: "http://localhost:3001",
 		viewport: { width: 1280, height: 800 },

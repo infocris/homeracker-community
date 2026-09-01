@@ -4,10 +4,13 @@ import { test as base, type Page } from "@playwright/test";
  * Wait for the app to finish loading and the Three.js scene to be ready.
  */
 export async function waitForApp(page: Page) {
-  await page.waitForSelector(".app", { timeout: 10_000 });
+  // 15s, not 10: under software WebGL the first commit waits on shader compilation,
+  // which measures ~4.7s alone and more when workers compete for the CPU. The suite
+  // is testing assembly logic, not how fast a software rasteriser warms up.
+  await page.waitForSelector(".app", { timeout: 15_000 });
   // Wait for R3F to mount and expose the scene object
   await page.waitForFunction(() => !!(window as any).__scene, {
-    timeout: 10_000,
+    timeout: 15_000,
   });
 }
 

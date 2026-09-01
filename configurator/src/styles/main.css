@@ -113,6 +113,16 @@
     color: var(--text);
   }
 
+  .sidebar-draw-group {
+    display: flex;
+    gap: 6px;
+    padding: 8px 16px 0;
+  }
+
+  .sidebar-draw-group .toolbar-btn {
+    flex: 1;
+  }
+
   .sidebar-search-container {
     padding: 8px 16px;
     border-bottom: 1px solid var(--border);
@@ -136,6 +146,49 @@
 
   .sidebar-search:focus {
     border-color: var(--accent);
+  }
+
+  .sidebar-topology {
+    background: rgba(0, 170, 255, 0.07);
+  }
+
+  .sidebar-topology .catalog-section-title {
+    cursor: default;
+    color: var(--accent);
+  }
+
+  .sidebar-topology-empty {
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+  }
+
+  .sidebar-position-filter {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px;
+    background: var(--bg-tertiary);
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+
+  .sidebar-position-filter input {
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  .sidebar-position-filter-empty {
+    padding: 12px 16px;
+    font-size: 12px;
+    line-height: 1.4;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
   }
 
   .catalog-section {
@@ -450,10 +503,80 @@
     min-height: 0;
   }
 
+  .viewport[data-drawing="true"] canvas {
+    cursor: crosshair;
+  }
+
   .viewport canvas {
     width: 100% !important;
     height: 100% !important;
   }
+
+/* Frame for an inset view. Position and size come from inline styles, driven by the
+   same fractions as the scissored render, so the two cannot drift apart. */
+.viewport-inset {
+  position: absolute;
+  z-index: 6;
+  pointer-events: none;
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+}
+
+.viewport-inset__label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: 2px 6px;
+  background: rgba(22, 33, 62, 0.85);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.viewport-shadow-toggle {
+  position: absolute;
+  left: 224px;
+  bottom: 20px;
+  z-index: 6;
+  height: 34px;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--bg-primary);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  color: #f4f8ff;
+  cursor: pointer;
+}
+
+.viewport-mirror-toggle {
+  position: absolute;
+  left: 320px;
+  bottom: 20px;
+  z-index: 6;
+  height: 34px;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--bg-primary);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  color: #f4f8ff;
+  cursor: pointer;
+}
+
+.viewport-mirror-toggle--on {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 
 .viewport-camera-toggle {
   position: absolute;
@@ -570,18 +693,34 @@
     50% { opacity: 0.5; }
   }
 
-  /* BOM Panel */
-  .bom-panel {
+  /* Right panel (suggestions + BOM) */
+  .right-panel {
     width: var(--bom-width);
     background: var(--bg-secondary);
     border-left: 1px solid var(--border);
     overflow-y: auto;
     flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
     transition: width 0.2s ease;
   }
 
-  .bom-panel-wide {
+  .right-panel:has(.bom-panel-wide) {
     width: 420px;
+  }
+
+  /* BOM Panel */
+  .bom-panel {
+    width: 100%;
+    background: transparent;
+    border-left: none;
+    overflow: visible;
+    flex: 1;
+    min-height: 0;
+  }
+
+  .bom-panel-wide {
+    width: 100%;
   }
 
   .bom-header {
@@ -931,3 +1070,116 @@
       transform: translateX(-50%) translateY(-10px);
     }
   }
+
+
+.shadow-settings-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(10, 12, 24, 0.55);
+}
+
+.shadow-settings {
+  width: 320px;
+  max-width: calc(100% - 32px);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.55);
+}
+
+.shadow-settings-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.shadow-settings-header h2 {
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+}
+
+.shadow-settings-close {
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.shadow-settings-close:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.shadow-settings-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.shadow-settings-check input {
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.shadow-settings-row {
+  display: grid;
+  grid-template-columns: 72px 1fr 44px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.shadow-settings-row input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.shadow-settings-label {
+  color: var(--text-secondary);
+}
+
+.shadow-settings-value {
+  text-align: right;
+  color: var(--text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+.shadow-settings-note {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.dimension-label {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(22, 33, 62, 0.92);
+  border: 1px solid var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
