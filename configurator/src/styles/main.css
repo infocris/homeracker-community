@@ -1170,6 +1170,22 @@
   color: var(--text-secondary);
 }
 
+/* Shortcut letter riding on each rotation ring, coloured to match it */
+.rotation-key {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: rgba(22, 33, 62, 0.92);
+  border: 1px solid currentColor;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  user-select: none;
+}
+
 .dimension-label {
   display: inline-block;
   padding: 2px 7px;

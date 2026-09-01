@@ -24,6 +24,7 @@ import {
   IDENTITY_ROTATION,
 } from "../assembly/part-sizing";
 import { resolveDraw } from "../assembly/draw";
+import { rotateBlock } from "../assembly/block-rotation";
 import {
   type AttachmentPoint,
   attachmentPointsOf,
@@ -128,6 +129,7 @@ assembly.subscribe(() => {
 };
 (window as any).__placedPartBounds = placedPartBounds;
 (window as any).__resolveDraw = resolveDraw;
+(window as any).__rotateBlock = rotateBlock;
 (window as any).__compat = {
   attachmentPointsOf,
   nearestAttachmentPoint,
@@ -617,89 +619,95 @@ export function App() {
     setSelectedPartIds((prev) => new Set([...prev].map((id) => remap.get(id) ?? id)));
   }, [shiftParts]);
 
+  /**
+   * Turns the selection a quarter about an axis: one part on itself, a set of parts as
+   * one body.
+   *
+   * A body turn was the missing half. Bumping each part's own rotation and leaving its
+   * position alone spins the pieces where they stand — the layout never turns, which
+   * for anything but a single part is not a rotation at all.
+   */
   const handleRotateSelectedParts = useCallback(
-    (axis: 0 | 1 | 2) => {
-      if (selectedPartIds.size === 0) return;
+    (axis: 0 | 1 | 2, turns: 1 | 3 = 1) => {
+      const selected = [...selectedPartIds].map((id) => assembly.getPartById(id)).filter((p): p is PlacedPart => !!p);
+      if (selected.length === 0) return;
 
-      const partsToRotate: {
-        id: string;
-        def: string;
-        pos: GridPosition;
-        oldRot: Rotation3;
-        orient?: Axis;
-        color?: string;
-      }[] = [];
-      for (const id of selectedPartIds) {
-        const part = assembly.getPartById(id);
-        if (!part) continue;
-        partsToRotate.push({
-          id,
-          def: part.definitionId,
-          pos: part.position,
-          oldRot: part.rotation,
-          orient: part.orientation,
-          color: part.color,
-        });
+      const turned =
+        selected.length === 1
+          ? [
+              {
+                id: selected[0].instanceId,
+                definitionId: selected[0].definitionId,
+                position: selected[0].position,
+                // A lone part turns on the spot, which is what the shortcut has always
+                // done and what its own handles are anchored to
+                rotation: (() => {
+                  const next: Rotation3 = [...selected[0].rotation];
+                  for (let i = 0; i < turns; i++) next[axis] = nextStep(next[axis]);
+                  return next;
+                })(),
+                orientation: selected[0].orientation,
+                color: selected[0].color,
+              },
+            ]
+          : rotateBlock(selected, axis, turns, snapshot.gravityEnabled);
+
+      if (!turned) {
+        setToast("That turn cannot be expressed on the grid");
+        setTimeout(() => setToast(null), 2500);
+        return;
       }
-      if (partsToRotate.length === 0) return;
+
+      for (const t of turned) {
+        const def = getPartDefinition(t.definitionId);
+        if (!def) continue;
+        const bounded = clampToWorkspace(rotateGridCells(def.gridCells, t.rotation), t.position, t.orientation);
+        if (bounded[0] !== t.position[0] || bounded[1] !== t.position[1] || bounded[2] !== t.position[2]) {
+          setToast("That turn would take the selection outside the buildable area");
+          setTimeout(() => setToast(null), 2500);
+          return;
+        }
+      }
+
+      const before = selected.map((p) => ({
+        id: p.instanceId,
+        definitionId: p.definitionId,
+        position: p.position,
+        rotation: p.rotation,
+        orientation: p.orientation,
+        color: p.color,
+      }));
+
+      // The ids the turn issues, kept by the command itself rather than looked up
+      // afterwards: two parts of one definition can share a cell, so definition and
+      // position do not always name one part.
+      let created: string[] = [];
 
       const cmd: Command = {
-        description: `Rotate ${partsToRotate.length} part(s)`,
+        description: `Rotate ${before.length} part(s)`,
         execute() {
-          for (const p of partsToRotate) assembly.removePart(p.id);
-          for (const p of partsToRotate) {
-            const newRot: Rotation3 = [...p.oldRot];
-            newRot[axis] = nextStep(newRot[axis]);
-            assembly.addPart(p.def, p.pos, newRot, p.orient, p.color);
+          for (const p of before) assembly.removePart(p.id);
+          created = [];
+          for (const t of turned) {
+            const id = assembly.addPart(t.definitionId, t.position, t.rotation, t.orientation, t.color);
+            if (id) created.push(id);
           }
+          setSelectedPartIds(new Set(created));
         },
         undo() {
-          const allParts = assembly.getAllParts();
-          for (const p of partsToRotate) {
-            const newRot: Rotation3 = [...p.oldRot];
-            newRot[axis] = nextStep(newRot[axis]);
-            const match = allParts.find(
-              (ap) =>
-                ap.definitionId === p.def &&
-                ap.position[0] === p.pos[0] &&
-                ap.position[1] === p.pos[1] &&
-                ap.position[2] === p.pos[2] &&
-                ap.rotation[0] === newRot[0] &&
-                ap.rotation[1] === newRot[1] &&
-                ap.rotation[2] === newRot[2],
-            );
-            if (match) assembly.removePart(match.instanceId);
+          for (const id of created) assembly.removePart(id);
+          const restored: string[] = [];
+          for (const p of before) {
+            const id = assembly.addPart(p.definitionId, p.position, p.rotation, p.orientation, p.color);
+            if (id) restored.push(id);
           }
-          for (const p of partsToRotate) assembly.addPart(p.def, p.pos, p.oldRot, p.orient, p.color);
+          setSelectedPartIds(new Set(restored));
         },
       };
       history.execute(cmd);
-      // Re-select rotated parts (they get new IDs after remove+add)
-      const allParts = assembly.getAllParts();
-      const newIds = new Set<string>();
-      const released: [string, string][] = [];
-      for (const p of partsToRotate) {
-        const newRot: Rotation3 = [...p.oldRot];
-        newRot[axis] = nextStep(newRot[axis]);
-        const match = allParts.find(
-          (ap) =>
-            ap.definitionId === p.def &&
-            ap.position[0] === p.pos[0] &&
-            ap.position[1] === p.pos[1] &&
-            ap.position[2] === p.pos[2] &&
-            ap.rotation[0] === newRot[0] &&
-            ap.rotation[1] === newRot[1] &&
-            ap.rotation[2] === newRot[2],
-        );
-        if (match) {
-          newIds.add(match.instanceId);
-          released.push([p.id, match.instanceId]);
-        }
-      }
-      setSelectedPartIds(newIds);
-      keepUnlocked(released);
+      keepUnlocked(before.map((p, i) => [p.id, created[i]] as [string, string]).filter((pair) => !!pair[1]));
     },
-    [selectedPartIds, keepUnlocked],
+    [selectedPartIds, keepUnlocked, snapshot.gravityEnabled],
   );
 
   const handleOrientSelectedParts = useCallback(() => {

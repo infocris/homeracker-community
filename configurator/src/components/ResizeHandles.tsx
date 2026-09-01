@@ -11,11 +11,16 @@ type LengthFace = "+x" | "-x" | "+y" | "-y" | "+z" | "-z";
 const AXIS_INDEX: Record<LengthAxis, 0 | 1 | 2> = { x: 0, y: 1, z: 2 };
 
 /**
- * How far the handle floats past the end of the bar. Strictly under half a cell, so
- * the boundary a click resolves to is still the bar's own end — a bigger gap would
- * make merely grabbing a handle resize the part by one cell.
+ * How far the handle floats past the end of the bar — far enough to stand clear of a
+ * connector sitting on that end, which used to swallow it.
+ *
+ * It once had to stay under half a cell, when the drag read the cursor's absolute
+ * position and a handle past the cell boundary resized the bar the moment it was
+ * grabbed. The drag measures travel now: the length comes from the part's own size
+ * plus how far the cursor has moved, so where the handle floats no longer enters the
+ * arithmetic at all.
  */
-const HANDLE_GAP = BASE_UNIT * 0.4;
+const HANDLE_GAP = BASE_UNIT * 0.95;
 
 export type ResizePreview = {
   instanceId: string;
@@ -72,6 +77,16 @@ const AXIS_SWITCH_THRESHOLD = 40;
 /** How much better a rival axis must score before the bar swings onto it. Without a
  *  margin the choice flickers whenever the cursor runs near a diagonal. */
 const AXIS_SWITCH_MARGIN = 0.12;
+
+/**
+ * How near the cursor has to come back to where the press started, in screen pixels,
+ * for the bar to be handed back exactly as it was.
+ *
+ * Wider than the pick threshold, so the home zone covers the dead zone rather than
+ * leaving a ring between them; well under the switch threshold, so it never competes
+ * with the gesture that re-aims the bar in the first place.
+ */
+const HOMING_THRESHOLD = 14;
 
 /**
  * Pick the world axis whose direction on screen best matches where the cursor went.
@@ -303,6 +318,25 @@ export function ResizeHandles({ part, origin, size, onPreview, onResize, onDragg
       if (!drag) return null;
       const pivotWorld = new THREE.Vector3(...gridToWorld(drag.pivot));
       const travel = { x: clientX - drag.startX, y: clientY - drag.startY };
+
+      /*
+       * Back where the press started: the bar is handed back exactly as it was, aim
+       * included.
+       *
+       * Without this there is no way to change your mind. Once a drag has swung the
+       * bar onto another axis the hysteresis keeps it there, so bringing the handle
+       * home would leave the bar re-aimed at its original length — near enough to look
+       * like nothing happened, while the part had in fact been turned. Resetting the
+       * axis as well as the box means the next move decides afresh.
+       */
+      if (Math.hypot(travel.x, travel.y) <= HOMING_THRESHOLD) {
+        drag.axis = drag.face[1] as LengthAxis;
+        return {
+          position: [...drag.originPos] as GridPosition,
+          size: [...drag.originSize] as [number, number, number],
+        };
+      }
+
       drag.axis = axisFromCursorTravel(drag.axis, pivotWorld, travel, toScreen);
 
       // Measured as travel, not as absolute position: the cursor starts on the handle,

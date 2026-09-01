@@ -114,7 +114,7 @@ interface ViewportProps {
   onPasteParts: (clipboard: ClipboardData, targetPosition: GridPosition, extraRotation?: Rotation3) => void;
   onBoxSelect: (ids: string[]) => void;
   onNudgeParts: (dx: number, dy: number, dz: number) => void;
-  onRotateSelectedParts: (axis: 0 | 1 | 2) => void;
+  onRotateSelectedParts: (axis: 0 | 1 | 2, turns?: 1 | 3) => void;
   onOrientSelectedParts: () => void;
   onEscape: () => void;
   flashPartId: string | null;
@@ -464,6 +464,7 @@ function PartMesh({
   isPlacing,
   isFlashing,
   isColliding,
+  isFaded,
   onPointerDown,
 }: {
   part: PlacedPart;
@@ -472,6 +473,8 @@ function PartMesh({
   isPlacing: boolean;
   isFlashing: boolean;
   isColliding: boolean;
+  /** Standing between the camera and the selection: ghosted, and out of the way of clicks */
+  isFaded: boolean;
   onPointerDown: (e: any) => void;
 }) {
   const def = getPartDefinition(part.definitionId);
@@ -486,6 +489,7 @@ function PartMesh({
         isPlacing={isPlacing}
         isFlashing={isFlashing}
         isColliding={isColliding}
+        isFaded={isFaded}
         onPointerDown={onPointerDown}
       />
     );
@@ -500,6 +504,7 @@ function PartMesh({
         isPlacing={isPlacing}
         isFlashing={isFlashing}
         isColliding={isColliding}
+        isFaded={isFaded}
         onPointerDown={onPointerDown}
       />
     </Suspense>
@@ -524,6 +529,123 @@ function SuggestionPreview({
       <Suspense fallback={<GhostFallback definitionId={definitionId} isSnapped />}>
         <GhostModel definitionId={definitionId} rotation={rotation} isSnapped />
       </Suspense>
+    </group>
+  );
+}
+
+/** Colour per axis on the rotation rings: the same three the app uses for x, y, z. */
+const AXIS_RING_COLOR = ["#ff5a5a", "#5aff8f", "#5a9dff"];
+/** The keys that turn about x, y and z — the same ones the shortcuts use. */
+const AXIS_RING_LABEL = ["T", "R", "F"];
+const AXIS_RING_AXIS = ["x", "y", "z"];
+
+/**
+ * Where each ring carries its shortcut, as a unit vector scaled by the radius. Each
+ * sits at 45° in its own ring's plane, in a direction the other two rings do not pass
+ * through, so the three badges stay apart whatever the camera does.
+ */
+/** A cell and its six face neighbours: what counts as touching the selection. */
+const TOUCHING_CELLS: [number, number, number][] = [
+  [0, 0, 0],
+  [1, 0, 0],
+  [-1, 0, 0],
+  [0, 1, 0],
+  [0, -1, 0],
+  [0, 0, 1],
+  [0, 0, -1],
+];
+
+const DIAGONAL = Math.SQRT1_2;
+const KEY_BADGE_AT: [number, number, number][] = [
+  [0, DIAGONAL, DIAGONAL],
+  [DIAGONAL, 0, DIAGONAL],
+  [DIAGONAL, DIAGONAL, 0],
+];
+
+/**
+ * Quarter-turn handles for a set of parts: one ring per axis, drawn around the middle
+ * of what is selected.
+ *
+ * A ring is clicked rather than dragged. The grid only admits quarter turns, so a
+ * sweep would land on the same four positions a click already reaches, and a click
+ * cannot be mistaken for an attempt to orbit the camera. Shift turns the other way.
+ */
+function RotationHandles({
+  centre,
+  radius,
+  onRotate,
+}: {
+  centre: [number, number, number];
+  radius: number;
+  onRotate: (axis: 0 | 1 | 2, turns: 1 | 3) => void;
+}) {
+  const [hovered, setHovered] = useState<number | null>(null);
+  // Perpendicular to the axis it turns about: the ring lies in the plane of the turn
+  const lie: [number, number, number][] = [
+    [0, Math.PI / 2, 0],
+    [Math.PI / 2, 0, 0],
+    [0, 0, 0],
+  ];
+
+  return (
+    <group position={centre}>
+      {[0, 1, 2].map((axis) => (
+        <mesh
+          key={axis}
+          rotation={lie[axis]}
+          onPointerOver={(e) => {
+            e.stopPropagation();
+            setHovered(axis);
+          }}
+          onPointerOut={(e) => {
+            e.stopPropagation();
+            setHovered(null);
+          }}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRotate(axis as 0 | 1 | 2, e.nativeEvent.shiftKey ? 3 : 1);
+          }}
+        >
+          <torusGeometry args={[radius, BASE_UNIT * (hovered === axis ? 0.11 : 0.06), 8, 48]} />
+          <meshBasicMaterial
+            color={AXIS_RING_COLOR[axis]}
+            transparent
+            opacity={hovered === axis ? 0.95 : 0.4}
+            depthWrite={false}
+          />
+        </mesh>
+      ))}
+      {/* The shortcut for each ring, riding on the ring itself. One per octant
+          direction so the three never land on each other. */}
+      {[0, 1, 2].map((axis) => (
+        <Html
+          key={axis}
+          position={KEY_BADGE_AT[axis].map((u) => u * radius) as [number, number, number]}
+          center
+          zIndexRange={[14, 10]}
+          style={{ pointerEvents: "none" }}
+        >
+          <span
+            className="rotation-key"
+            style={{ color: AXIS_RING_COLOR[axis], opacity: hovered === null || hovered === axis ? 1 : 0.45 }}
+          >
+            {AXIS_RING_LABEL[axis]}
+          </span>
+        </Html>
+      ))}
+
+      {hovered !== null && (
+        <Html
+          position={[0, radius + BASE_UNIT * 0.75, 0]}
+          center
+          zIndexRange={[15, 10]}
+          style={{ pointerEvents: "none" }}
+        >
+          <span className="dimension-label">
+            {AXIS_RING_LABEL[hovered]} · quarter turn about {AXIS_RING_AXIS[hovered]} · shift to reverse
+          </span>
+        </Html>
+      )}
     </group>
   );
 }
@@ -704,6 +826,7 @@ function CustomPartMesh({
   isPlacing,
   isFlashing,
   isColliding,
+  isFaded,
   onPointerDown,
 }: {
   part: PlacedPart;
@@ -712,6 +835,7 @@ function CustomPartMesh({
   isPlacing: boolean;
   isFlashing: boolean;
   isColliding: boolean;
+  isFaded: boolean;
   onPointerDown: (e: any) => void;
 }) {
   const def = getPartDefinition(part.definitionId)!;
@@ -743,7 +867,7 @@ function CustomPartMesh({
 
   const categoryColor = part.color ?? PART_COLORS.custom;
   const color = isSelected ? PART_COLORS.selected : isColliding ? PART_COLORS.collision : categoryColor;
-  const opacity = isDragging ? 0.3 : 1;
+  const opacity = isDragging ? 0.3 : isFaded ? 0.22 : 1;
 
   return (
     <group
@@ -759,14 +883,16 @@ function CustomPartMesh({
     >
       <group position={offset}>
         <group rotation={partEuler}>
-          <mesh geometry={geometry}>
+          {/* A ghosted part is out of the way of clicks too — see PartMeshLoaded */}
+          <mesh geometry={geometry} raycast={isFaded ? () => {} : undefined}>
             <meshStandardMaterial
               ref={flashRef}
               color={color}
               roughness={1}
               metalness={0}
-              transparent={isDragging}
+              transparent={isDragging || isFaded}
               opacity={opacity}
+              depthWrite={!isFaded}
             />
           </mesh>
         </group>
@@ -789,6 +915,7 @@ function PartMeshLoaded({
   isPlacing,
   isFlashing,
   isColliding,
+  isFaded,
   onPointerDown,
 }: {
   part: PlacedPart;
@@ -797,6 +924,7 @@ function PartMeshLoaded({
   isPlacing: boolean;
   isFlashing: boolean;
   isColliding: boolean;
+  isFaded: boolean;
   onPointerDown: (e: any) => void;
 }) {
   const def = getPartDefinition(part.definitionId)!;
@@ -843,6 +971,10 @@ function PartMeshLoaded({
           originalMaterials.current.set(child, child.material);
         }
         const orig = originalMaterials.current.get(child) ?? child.material;
+        // A ghosted part steps out of the way of the pointer as well as the eye: the
+        // handles it was hiding are right behind it, and the nearest hit wins a
+        // raycast whatever its opacity.
+        child.raycast = isFaded ? () => {} : THREE.Mesh.prototype.raycast;
         if (isDragging) {
           if (part.color) {
             child.material = makeColorMaterial(part.color, orig, {
@@ -872,6 +1004,16 @@ function PartMeshLoaded({
             emissive: new THREE.Color(PART_COLORS.collision),
             emissiveIntensity: 0.4,
           });
+        } else if (isFaded) {
+          if (part.color) {
+            child.material = makeColorMaterial(part.color, orig, { transparent: true, opacity: 0.22 });
+          } else {
+            const mat = orig.clone();
+            mat.transparent = true;
+            mat.opacity = 0.22;
+            mat.depthWrite = false;
+            child.material = mat;
+          }
         } else if (part.color) {
           child.material = makeColorMaterial(part.color, orig);
         } else {
@@ -881,7 +1023,7 @@ function PartMeshLoaded({
         }
       }
     });
-  }, [isSelected, isDragging, isFlashing, isColliding, part.color]);
+  }, [isSelected, isDragging, isFlashing, isColliding, isFaded, part.color]);
 
   // Flash animation for "find part" from selection panel
   const flashStart = useRef(0);
@@ -1820,6 +1962,11 @@ interface SceneProps extends ViewportProps {
   resizePreview: ResizePreview | null;
   onResizePreview: (preview: ResizePreview | null) => void;
   selectedResizable: { part: PlacedPart; origin: GridPosition; size: [number, number, number] } | null;
+  /** Connectors ghosted out of the way of a selected support */
+  fadedPartIds: Set<string>;
+  /** Middle and reach of a multi-part selection, for the rotation rings */
+  selectionBody: { centre: [number, number, number]; radius: number } | null;
+  onRotateSelectedParts: (axis: 0 | 1 | 2, turns?: 1 | 3) => void;
 }
 
 /** Scene contents — lives inside the Canvas */
@@ -1860,6 +2007,9 @@ function Scene({
   resizePreview,
   onResizePreview,
   selectedResizable,
+  selectionBody,
+  fadedPartIds,
+  onRotateSelectedParts,
 }: SceneProps) {
   const groundRef = useRef<THREE.Mesh>(null);
   const [handleDragging, setHandleDragging] = useState(false);
@@ -2105,6 +2255,7 @@ function Scene({
             <PartMesh
               part={renderPart}
               isSelected={selectedPartIds.has(part.instanceId)}
+              isFaded={fadedPartIds.has(part.instanceId)}
               isDragging={dragState?.instanceId === part.instanceId}
               isPlacing={mode.type === "place" || mode.type === "draw"}
               isFlashing={flashPartId === part.instanceId || flashDefinitionId === part.definitionId}
@@ -2114,6 +2265,10 @@ function Scene({
           </group>
         );
       })}
+
+      {selectionBody && mode.type === "select" && !dragState && (
+        <RotationHandles centre={selectionBody.centre} radius={selectionBody.radius} onRotate={onRotateSelectedParts} />
+      )}
 
       {selectedResizable && mode.type === "select" && !dragState && (
         <>
@@ -2375,6 +2530,76 @@ export function ViewportCanvas(props: ViewportProps) {
   useEffect(() => {
     if (props.mode.type !== "draw") setDrawDrag(null);
   }, [props.mode.type]);
+
+  /**
+   * Connectors touching a selected support, ghosted so the bar reads whole.
+   *
+   * A bar's ends are where its handles live and where its length is judged, and a
+   * connector sitting on one swallows both. Only supports trigger it: selecting a
+   * connector to look at it and having its neighbours vanish would be the opposite
+   * of useful.
+   */
+  const fadedPartIds = useMemo(() => {
+    const faded = new Set<string>();
+    if (props.selectedPartIds.size === 0) return faded;
+
+    const selectedSupports = props.parts.filter(
+      (p) => props.selectedPartIds.has(p.instanceId) && getPartDefinition(p.definitionId)?.category === "support",
+    );
+    if (selectedSupports.length === 0) return faded;
+    const supportIds = new Set(selectedSupports.map((p) => p.instanceId));
+
+    const occupancy = props.assembly.gridOccupancy;
+    for (const [key, ids] of occupancy) {
+      if (!ids.some((id) => supportIds.has(id))) continue;
+      const cell = key.split(",").map(Number);
+      // The cell itself included: a pull-through connector shares it with the bar
+      for (const [dx, dy, dz] of TOUCHING_CELLS) {
+        const neighbours = occupancy.get(`${cell[0] + dx},${cell[1] + dy},${cell[2] + dz}`);
+        if (!neighbours) continue;
+        for (const id of neighbours) {
+          if (props.selectedPartIds.has(id)) continue;
+          const part = props.parts.find((p) => p.instanceId === id);
+          if (part && getPartDefinition(part.definitionId)?.category === "connector") faded.add(id);
+        }
+      }
+    }
+    return faded;
+  }, [props.selectedPartIds, props.parts, props.assembly]);
+
+  /** Middle of the selection and how far it reaches, in world units. */
+  const selectionBody = useMemo(() => {
+    if (props.selectedPartIds.size === 0) return null;
+    const selected = props.parts.filter((p) => props.selectedPartIds.has(p.instanceId));
+    if (selected.length === 0) return null;
+
+    const min: [number, number, number] = [Infinity, Infinity, Infinity];
+    const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+    for (const part of selected) {
+      const bounds = placedPartBounds(part);
+      if (!bounds) continue;
+      for (let i = 0; i < 3; i++) {
+        min[i] = Math.min(min[i], bounds.min[i]);
+        max[i] = Math.max(max[i], bounds.min[i] + bounds.size[i] - 1);
+      }
+    }
+    if (!Number.isFinite(min[0])) return null;
+
+    const centre = gridToWorld([(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2]);
+    /*
+     * Just clear of the body, with a floor so a small selection still gets a ring big
+     * enough to aim at. Enclosing keeps the rings clickable; the margin is small so
+     * they read as a control on the selection rather than a hoop around the scene.
+     *
+     * A lone support also carries length handles at its ends, and at the default
+     * margin the ring runs straight through them and takes their clicks. The margin
+     * widens to clear the handle balls when they are there.
+     */
+    const sharesWithHandles = selected.length === 1 && !!resizeEnvelopeOf(selected[0]);
+    const margin = BASE_UNIT * (sharesWithHandles ? 0.95 : 0.35);
+    const span = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]) + 1;
+    return { centre, radius: Math.max((span * BASE_UNIT) / 2 + margin, BASE_UNIT * 1.4) };
+  }, [props.selectedPartIds, props.parts]);
 
   const selectedResizable = useMemo(() => {
     if (props.selectedPartIds.size !== 1) return null;
@@ -2901,6 +3126,9 @@ export function ViewportCanvas(props: ViewportProps) {
           resizePreview={resizePreview}
           onResizePreview={setResizePreview}
           selectedResizable={selectedResizable}
+          selectionBody={selectionBody}
+          fadedPartIds={fadedPartIds}
+          onRotateSelectedParts={props.onRotateSelectedParts}
         />
         {(mirrorMinimap || junctionCell) && (
           <ViewportInsets mirror={mirrorMinimap} junction={junctionCell} junctionParts={junctionParts} />
