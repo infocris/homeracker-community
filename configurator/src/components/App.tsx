@@ -27,6 +27,8 @@ import { resolveDraw } from "../assembly/draw";
 import { rotateBlock } from "../assembly/block-rotation";
 import {
   type AttachmentPoint,
+  type ConnectorAdaptation,
+  adaptiveConnectorFor,
   attachmentPointsOf,
   compatiblePartsAt,
   nearestAttachmentPoint,
@@ -138,6 +140,7 @@ assembly.subscribe(() => {
   throughDirectionsAt,
   topologySuggestionsAt,
   replacementSuggestionsAt,
+  adaptiveConnectorFor,
 };
 (window as any).__gravity = {
   placementCollides,
@@ -382,7 +385,13 @@ export function App() {
   }, [selectedPartIds]);
 
   const handleMovePart = useCallback(
-    (instanceId: string, newPosition: GridPosition, newRotation?: PlacedPart["rotation"], newOrientation?: Axis) => {
+    (
+      instanceId: string,
+      newPosition: GridPosition,
+      newRotation?: PlacedPart["rotation"],
+      newOrientation?: Axis,
+      adaptation?: ConnectorAdaptation | null,
+    ) => {
       const part = assembly.getPartById(instanceId);
       if (!part) return;
       // The authority on the lock, whichever gesture asked for the move
@@ -405,15 +414,62 @@ export function App() {
       const oldColor = part.color;
       const definitionId = part.definitionId;
 
+      /*
+       * A connector the drop asks to change travels with the move as one command: the
+       * gesture was single, so the undo should be too. Captured by value, since the
+       * part it names will have been reissued by the time undo runs.
+       */
+      const adapted = (() => {
+        if (!adaptation) return null;
+        const connector = assembly.getPartById(adaptation.instanceId);
+        if (!connector) return null;
+        return {
+          before: {
+            definitionId: connector.definitionId,
+            position: [...connector.position] as GridPosition,
+            rotation: [...connector.rotation] as Rotation3,
+            orientation: connector.orientation,
+            color: connector.color,
+          },
+          after: {
+            definitionId: adaptation.definitionId,
+            position: [...adaptation.cell] as GridPosition,
+            rotation: adaptation.rotation,
+            orientation: connector.orientation,
+            color: connector.color,
+          },
+        };
+      })();
+
       const cmd: Command = {
-        description: `Move ${definitionId}`,
+        description: adapted ? `Move ${definitionId} and adapt ${adapted.after.definitionId}` : `Move ${definitionId}`,
         execute() {
           removeMatchingParts([
             { definitionId, position: oldPosition, rotation: oldRotation, orientation: oldOrientation },
           ]);
+          if (adapted) {
+            removeMatchingParts([adapted.before]);
+            assembly.addPart(
+              adapted.after.definitionId,
+              adapted.after.position,
+              adapted.after.rotation,
+              adapted.after.orientation,
+              adapted.after.color,
+            );
+          }
           assembly.addPart(definitionId, newPosition, rotation, orientation, oldColor);
         },
         undo() {
+          if (adapted) {
+            removeMatchingParts([adapted.after]);
+            assembly.addPart(
+              adapted.before.definitionId,
+              adapted.before.position,
+              adapted.before.rotation,
+              adapted.before.orientation,
+              adapted.before.color,
+            );
+          }
           // Find the part at the new position and move it back
           const parts = assembly.getAllParts();
           const match = parts.find(

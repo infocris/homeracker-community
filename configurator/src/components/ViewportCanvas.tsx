@@ -57,7 +57,12 @@ import {
   loadLightSettings,
   saveLightSettings,
 } from "./ShadowSettings";
-import { type AttachmentPoint, targetCellOf } from "../assembly/compatibility";
+import {
+  type AttachmentPoint,
+  type ConnectorAdaptation,
+  adaptiveConnectorFor,
+  targetCellOf,
+} from "../assembly/compatibility";
 import { settleWithGravity, restOnCollision, placementIsGrounded } from "../assembly/gravity";
 
 /** Pointer travel (px) above which a press counts as a drag rather than a click */
@@ -99,7 +104,14 @@ interface ViewportProps {
   ) => void;
   onDraw: (position: GridPosition, size: [number, number, number]) => void;
   onResizePart: (instanceId: string, position: GridPosition, size: [number, number, number]) => void;
-  onMovePart: (instanceId: string, newPosition: GridPosition, rotation?: Rotation3, orientation?: Axis) => void;
+  onMovePart: (
+    instanceId: string,
+    newPosition: GridPosition,
+    rotation?: Rotation3,
+    orientation?: Axis,
+    /** A connector to swap in the same breath, so one gesture is one undo */
+    adaptation?: ConnectorAdaptation | null,
+  ) => void;
   onMoveSelectedParts: (primaryId: string, newPosition: GridPosition, rotation?: Rotation3, orientation?: Axis) => void;
   onClickPart: (instanceId: string, shiftKey: boolean, gridPoint?: GridPosition) => void;
   /** Parts held in place — selectable and clickable, but not draggable */
@@ -1668,6 +1680,7 @@ function DragPreview({
   verticalDragRef,
   selectedPartIds,
   parts,
+  onAdaptation,
 }: {
   dragState: DragState;
   assembly: AssemblyState;
@@ -1682,6 +1695,8 @@ function DragPreview({
   verticalDragRef: React.MutableRefObject<{ active: boolean; used: boolean; y: number }>;
   selectedPartIds: Set<string>;
   parts: PlacedPart[];
+  /** Reports the connector this drop would have to change, so it can be previewed */
+  onAdaptation: (adaptation: ConnectorAdaptation | null) => void;
 }) {
   const grabOffsetRef = useRef<[number, number] | null>(null);
   const partWorldY = gridToWorld(dragState.originalPosition)[1];
@@ -1715,7 +1730,50 @@ function DragPreview({
       orientation: effectiveOrientation,
       rotation: dragState.rotation,
     };
-  }, [gridPos, effectiveOrientation, dragState.rotation]);
+    // Where a drag has got to, for the e2e suite and for debugging by hand
+    (window as any).__dropDebug = {
+      instanceId: dragState.instanceId,
+      definitionId: dragState.definitionId,
+      position: [...gridPos],
+      orientation: effectiveOrientation,
+      rotation: [...dragState.rotation],
+      isSnapped,
+    };
+  }, [gridPos, effectiveOrientation, dragState.rotation, dragState.instanceId, dragState.definitionId, isSnapped]);
+
+  /*
+   * A support dropped end-on into a connector that has no arm for it: work out what
+   * the connector would have to become, so the drag can show it and the release can
+   * carry it out. Only a lone drag — moving a whole selection is a different gesture,
+   * and the connectors around it are usually travelling too.
+   */
+  useEffect(() => {
+    if (selectedPartIds.size > 1 && selectedPartIds.has(dragState.instanceId)) {
+      onAdaptation(null);
+      return;
+    }
+    onAdaptation(
+      adaptiveConnectorFor(assembly, {
+        instanceId: dragState.instanceId,
+        definitionId: dragState.definitionId,
+        position: gridPos,
+        rotation: dragState.rotation,
+        orientation: effectiveOrientation,
+      }),
+    );
+  }, [
+    assembly,
+    dragState.instanceId,
+    dragState.definitionId,
+    dragState.rotation,
+    gridPos,
+    effectiveOrientation,
+    selectedPartIds,
+    onAdaptation,
+  ]);
+
+  // The drop is off once the drag ends, whichever way it ended
+  useEffect(() => () => onAdaptation(null), [onAdaptation]);
 
   if (!def) return null;
 
@@ -2023,6 +2081,9 @@ interface SceneProps extends ViewportProps {
   selectedResizable: { part: PlacedPart; origin: GridPosition; size: [number, number, number] } | null;
   /** Connectors ghosted out of the way of a selected support */
   fadedPartIds: Set<string>;
+  /** The connector this drop would change, previewed until the drag ends */
+  adaptation: ConnectorAdaptation | null;
+  onAdaptation: (adaptation: ConnectorAdaptation | null) => void;
   /** Middle and reach of a multi-part selection, for the rotation rings */
   selectionBody: { centre: [number, number, number]; radius: number } | null;
   onRotateSelectedParts: (axis: 0 | 1 | 2, turns?: 1 | 3) => void;
@@ -2068,6 +2129,8 @@ function Scene({
   selectedResizable,
   selectionBody,
   fadedPartIds,
+  adaptation,
+  onAdaptation,
   onRotateSelectedParts,
 }: SceneProps) {
   const groundRef = useRef<THREE.Mesh>(null);
@@ -2268,6 +2331,13 @@ function Scene({
           rotation={previewSuggestion.rotation}
         />
       )}
+      {adaptation && (
+        <SuggestionPreview
+          definitionId={adaptation.definitionId}
+          position={adaptation.cell}
+          rotation={adaptation.rotation}
+        />
+      )}
 
       <WorkspaceBounds />
 
@@ -2295,6 +2365,8 @@ function Scene({
         // A replacement ghost stands on this very cell, so the connector it would
         // replace steps aside for it — otherwise the two are drawn into each other
         if (previewSuggestion?.replaces === part.instanceId) return null;
+        // The connector an adaptive drop would change steps aside for its own ghost
+        if (adaptation?.instanceId === part.instanceId) return null;
         const preview = resizePreview && resizePreview.instanceId === part.instanceId ? resizePreview : null;
         const renderPart: PlacedPart = preview ? previewPart(part, preview) : part;
         return (
@@ -2380,6 +2452,7 @@ function Scene({
           verticalDragRef={verticalDragRef}
           selectedPartIds={selectedPartIds}
           parts={parts}
+          onAdaptation={onAdaptation}
         />
       )}
 
@@ -2478,6 +2551,9 @@ export function ViewportCanvas(props: ViewportProps) {
 
   // Drag state
   const [dragState, setDragState] = useState<DragState | null>(null);
+  const [adaptation, setAdaptation] = useState<ConnectorAdaptation | null>(null);
+  const adaptationRef = useRef<ConnectorAdaptation | null>(null);
+  adaptationRef.current = adaptation;
   const dropTargetRef = useRef<{
     position: GridPosition;
     orientation?: Axis;
@@ -2905,9 +2981,16 @@ export function ViewportCanvas(props: ViewportProps) {
         if (props.selectedPartIds.size > 1 && props.selectedPartIds.has(dragState.instanceId)) {
           props.onMoveSelectedParts(dragState.instanceId, target.position, target.rotation, target.orientation);
         } else {
-          props.onMovePart(dragState.instanceId, target.position, target.rotation, target.orientation);
+          props.onMovePart(
+            dragState.instanceId,
+            target.position,
+            target.rotation,
+            target.orientation,
+            adaptationRef.current,
+          );
         }
         setDragState(null);
+        setAdaptation(null);
       } else {
         props.onClickPart(pending.instanceId, e.shiftKey, pending.gridPoint);
       }
@@ -3187,6 +3270,8 @@ export function ViewportCanvas(props: ViewportProps) {
           selectedResizable={selectedResizable}
           selectionBody={selectionBody}
           fadedPartIds={fadedPartIds}
+          adaptation={adaptation}
+          onAdaptation={setAdaptation}
           onRotateSelectedParts={props.onRotateSelectedParts}
         />
         {(mirrorMinimap || junctionCell) && (

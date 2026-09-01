@@ -128,9 +128,10 @@ function oppositeDirection(dir: Direction): Direction {
  * them — the bar is already there, threaded through where the connector will sit, and
  * the arms that embrace it are doing work rather than going spare.
  */
-export function throughDirectionsAt(assembly: AssemblyState, cell: GridPosition): Direction[] {
+export function throughDirectionsAt(assembly: AssemblyState, cell: GridPosition, ignoreIds?: Set<string>): Direction[] {
   const dirs = new Set<Direction>();
   for (const part of assembly.getAllParts()) {
+    if (ignoreIds?.has(part.instanceId)) continue;
     const def = getPartDefinition(part.definitionId);
     if (def?.category !== "support") continue;
     const cells = getWorldCells(rotateGridCells(def.gridCells, part.rotation), part.position, part.orientation ?? "y");
@@ -144,9 +145,10 @@ export function throughDirectionsAt(assembly: AssemblyState, cell: GridPosition)
 }
 
 /** World directions a connector at this cell has to account for. */
-export function branchDirectionsAt(assembly: AssemblyState, cell: GridPosition): Direction[] {
-  const dirs = new Set<Direction>(throughDirectionsAt(assembly, cell));
+export function branchDirectionsAt(assembly: AssemblyState, cell: GridPosition, ignoreIds?: Set<string>): Direction[] {
+  const dirs = new Set<Direction>(throughDirectionsAt(assembly, cell, ignoreIds));
   for (const part of assembly.getAllParts()) {
+    if (ignoreIds?.has(part.instanceId)) continue;
     if (getPartDefinition(part.definitionId)?.category !== "support") continue;
     for (const point of attachmentPointsOf(part)) {
       if (point.fit !== "adjacent") continue;
@@ -235,19 +237,118 @@ export function replacementSuggestionsAt(
   if (!current || current.category !== "connector") return { branches: [], suggestions: [] };
 
   const cell: GridPosition = [...part.position];
-  const branches = branchDirectionsAt(assembly, cell);
   const ignoreIds = new Set([part.instanceId]);
+  const branches = branchDirectionsAt(assembly, cell, ignoreIds);
+  return { branches, suggestions: connectorsCovering(assembly, cell, branches, ignoreIds, part) };
+}
 
-  const suggestions: TopologySuggestion[] = [];
+/**
+ * Connectors that reach every one of `branches` and stand clear at `cell`, tightest
+ * fit first. Spare arms are allowed: a junction gains a branch by trading up.
+ */
+function connectorsCovering(
+  assembly: AssemblyState,
+  cell: GridPosition,
+  branches: Direction[],
+  ignoreIds: Set<string>,
+  keepAimOf?: { definitionId: string; rotation: Rotation3 },
+): TopologySuggestion[] {
+  const out: TopologySuggestion[] = [];
   for (const def of PART_CATALOG) {
     if (def.category !== "connector" || def.connectionPoints.length < branches.length) continue;
-    const preferred = def.id === part.definitionId ? part.rotation : undefined;
+    const preferred = keepAimOf && def.id === keepAimOf.definitionId ? keepAimOf.rotation : undefined;
     const rotation = rotationFittingBranches(assembly, def, cell, branches, ignoreIds, preferred);
-    if (rotation) suggestions.push({ def, rotation });
+    if (rotation) out.push({ def, rotation });
   }
-  // Fewest spare arms first: the tightest fit is the likeliest swap
-  suggestions.sort((a, b) => a.def.connectionPoints.length - b.def.connectionPoints.length);
-  return { branches, suggestions };
+  out.sort((a, b) => a.def.connectionPoints.length - b.def.connectionPoints.length);
+  return out;
+}
+
+/** A connector that has to change so a support arriving at it has an arm to land on. */
+export type ConnectorAdaptation = {
+  /** The connector standing in the way */
+  instanceId: string;
+  cell: GridPosition;
+  from: string;
+  definitionId: string;
+  rotation: Rotation3;
+};
+
+/**
+ * The connector that would have to stand in for an existing one, so that a support
+ * being dropped end-on into it is actually held.
+ *
+ * Returns null when nothing needs to change — either no connector is being approached,
+ * or the one there already has an arm free in the right direction. The support itself
+ * is ignored throughout: mid-drag it still sits at its old place in the assembly, and
+ * counting the branch it used to make there would ask for the wrong connector.
+ */
+export function adaptiveConnectorFor(
+  assembly: AssemblyState,
+  support: {
+    instanceId: string;
+    definitionId: string;
+    position: GridPosition;
+    rotation: Rotation3;
+    orientation?: Axis;
+  },
+): ConnectorAdaptation | null {
+  const def = getPartDefinition(support.definitionId);
+  if (!def || def.category !== "support") return null;
+
+  const cells = getWorldCells(
+    rotateGridCells(def.gridCells, support.rotation),
+    support.position,
+    support.orientation ?? "y",
+  );
+  if (cells.length < 2) return null;
+
+  const ends: { cell: GridPosition; outward: Direction }[] = [
+    { cell: cells[0], outward: directionBetween(cells[0], cells[1]) },
+    {
+      cell: cells[cells.length - 1],
+      outward: directionBetween(cells[cells.length - 1], cells[cells.length - 2]),
+    },
+  ];
+
+  for (const end of ends) {
+    const cell = getAdjacentPosition(end.cell, end.outward);
+    if (cell[1] < 0) continue;
+
+    const occupants = assembly.gridOccupancy.get(`${cell[0]},${cell[1]},${cell[2]}`) ?? [];
+    const connector = occupants
+      .filter((id) => id !== support.instanceId)
+      .map((id) => assembly.getPartById(id))
+      .find((p): p is PlacedPart => !!p && getPartDefinition(p.definitionId)?.category === "connector");
+    if (!connector) continue;
+
+    const connectorDef = getPartDefinition(connector.definitionId);
+    if (!connectorDef) continue;
+
+    // The arm has to point back down the bar that is arriving
+    const arriving = oppositeDirection(end.outward);
+    const ignoreIds = new Set([connector.instanceId, support.instanceId]);
+    const branches = branchDirectionsAt(assembly, cell, ignoreIds);
+    if (!branches.includes(arriving)) branches.push(arriving);
+
+    // Nothing to adapt if the arriving bar already has an arm to land on. Whether the
+    // connector serves its other branches is not this gesture's business: swapping a
+    // connector the user did not aim at would be a surprise.
+    const arms = armDirections(connectorDef, connector.rotation);
+    if (arms.has(arriving)) continue;
+
+    const fit = connectorsCovering(assembly, cell, branches, ignoreIds, connector)[0];
+    if (!fit) continue;
+
+    return {
+      instanceId: connector.instanceId,
+      cell,
+      from: connector.definitionId,
+      definitionId: fit.def.id,
+      rotation: fit.rotation,
+    };
+  }
+  return null;
 }
 
 /** Bars that can be threaded through a cell along `axis` without an illegal overlap. */
