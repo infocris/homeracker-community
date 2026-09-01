@@ -40,6 +40,7 @@ export interface AssemblySnapshot {
   showCollisions: boolean;
   fineMeshCollisions: boolean;
   gravityEnabled: boolean;
+  adaptiveEnabled: boolean;
 }
 
 const SETTINGS_KEY = "homeracker-settings";
@@ -55,6 +56,7 @@ export class AssemblyState {
     showCollisions: false,
     fineMeshCollisions: false,
     gravityEnabled: true,
+    adaptiveEnabled: true,
   };
 
   /** When true, parts snap to nearby connection points during placement/drag */
@@ -65,6 +67,12 @@ export class AssemblyState {
   fineMeshCollisions: boolean = true;
   /** When true, moved and placed parts rest on what is below them instead of floating */
   gravityEnabled: boolean = true;
+  /**
+   * When true, a connector changes to suit the bars that arrive at it or leave it: it
+   * grows an arm for one dropped end-on into it, and drops back to the tightest fit
+   * when one is pulled away.
+   */
+  adaptiveEnabled: boolean = true;
 
   constructor() {
     try {
@@ -75,6 +83,7 @@ export class AssemblyState {
         if (settings.showCollisions !== undefined) this.showCollisions = !!settings.showCollisions;
         if (settings.fineMeshCollisions !== undefined) this.fineMeshCollisions = !!settings.fineMeshCollisions;
         if (settings.gravityEnabled !== undefined) this.gravityEnabled = !!settings.gravityEnabled;
+        if (settings.adaptiveEnabled !== undefined) this.adaptiveEnabled = !!settings.adaptiveEnabled;
       }
     } catch {
       /* ignore */
@@ -90,6 +99,7 @@ export class AssemblyState {
           showCollisions: this.showCollisions,
           fineMeshCollisions: this.fineMeshCollisions,
           gravityEnabled: this.gravityEnabled,
+          adaptiveEnabled: this.adaptiveEnabled,
         }),
       );
     } catch {
@@ -121,6 +131,12 @@ export class AssemblyState {
     this.notify();
   }
 
+  setAdaptiveEnabled(value: boolean) {
+    this.adaptiveEnabled = value;
+    this.persistSettings();
+    this.notify();
+  }
+
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -133,6 +149,7 @@ export class AssemblyState {
       showCollisions: this.showCollisions,
       fineMeshCollisions: this.fineMeshCollisions,
       gravityEnabled: this.gravityEnabled,
+      adaptiveEnabled: this.adaptiveEnabled,
     };
     for (const listener of this.listeners) {
       listener();

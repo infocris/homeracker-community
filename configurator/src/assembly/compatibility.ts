@@ -264,26 +264,50 @@ function connectorsCovering(
   return out;
 }
 
-/** A connector that has to change so a support arriving at it has an arm to land on. */
+/** A connector that has to change to suit the bars that will meet it after a drop. */
 export type ConnectorAdaptation = {
-  /** The connector standing in the way */
+  /** The connector standing there now */
   instanceId: string;
   cell: GridPosition;
   from: string;
   definitionId: string;
   rotation: Rotation3;
+  /** Why it changes: an arm gained for an arriving bar, or spare arms given up */
+  reason: "grows" | "simplifies";
 };
 
+/** The ends of a support, with the direction each one faces away from the bar. */
+function supportEnds(
+  definitionId: string,
+  position: GridPosition,
+  rotation: Rotation3,
+  orientation?: Axis,
+): { cell: GridPosition; outward: Direction }[] {
+  const def = getPartDefinition(definitionId);
+  if (!def || def.category !== "support") return [];
+  const cells = getWorldCells(rotateGridCells(def.gridCells, rotation), position, orientation ?? "y");
+  if (cells.length < 2) return [];
+  return [
+    { cell: cells[0], outward: directionBetween(cells[0], cells[1]) },
+    { cell: cells[cells.length - 1], outward: directionBetween(cells[cells.length - 1], cells[cells.length - 2]) },
+  ];
+}
+
 /**
- * The connector that would have to stand in for an existing one, so that a support
- * being dropped end-on into it is actually held.
+ * Connectors that would have to change for a support to land where it is being
+ * dropped: one it arrives at end-on with no arm free, and one it is leaving with an arm
+ * that will then serve nothing.
  *
- * Returns null when nothing needs to change — either no connector is being approached,
- * or the one there already has an arm free in the right direction. The support itself
- * is ignored throughout: mid-drag it still sits at its old place in the assembly, and
- * counting the branch it used to make there would ask for the wrong connector.
+ * The support is ignored while the junctions are read, since mid-drag it still sits at
+ * its old place in the assembly and counting the branch it makes there — or fails to
+ * make — would ask for the wrong connector. Its contribution at the *new* placement is
+ * added back explicitly.
+ *
+ * Nothing is proposed for a connector the gesture did not touch. Growing needs the
+ * arriving bar to have nowhere to land; simplifying needs the departing bar's own arm
+ * to fall idle. Spare arms a user left deliberately elsewhere are left alone.
  */
-export function adaptiveConnectorFor(
+export function adaptiveConnectorsFor(
   assembly: AssemblyState,
   support: {
     instanceId: string;
@@ -292,27 +316,32 @@ export function adaptiveConnectorFor(
     rotation: Rotation3;
     orientation?: Axis;
   },
-): ConnectorAdaptation | null {
+): ConnectorAdaptation[] {
   const def = getPartDefinition(support.definitionId);
-  if (!def || def.category !== "support") return null;
+  if (!def || def.category !== "support") return [];
 
-  const cells = getWorldCells(
-    rotateGridCells(def.gridCells, support.rotation),
-    support.position,
-    support.orientation ?? "y",
-  );
-  if (cells.length < 2) return null;
+  const placed = assembly.getPartById(support.instanceId);
+  const ignoreSupport = new Set([support.instanceId]);
 
-  const ends: { cell: GridPosition; outward: Direction }[] = [
-    { cell: cells[0], outward: directionBetween(cells[0], cells[1]) },
-    {
-      cell: cells[cells.length - 1],
-      outward: directionBetween(cells[cells.length - 1], cells[cells.length - 2]),
-    },
-  ];
+  const arriving = supportEnds(support.definitionId, support.position, support.rotation, support.orientation);
+  const leaving = placed ? supportEnds(placed.definitionId, placed.position, placed.rotation, placed.orientation) : [];
 
-  for (const end of ends) {
-    const cell = getAdjacentPosition(end.cell, end.outward);
+  /** Direction an end contributes to the junction it butts into */
+  const contribution = (end: { cell: GridPosition; outward: Direction }) => ({
+    cell: getAdjacentPosition(end.cell, end.outward),
+    arm: oppositeDirection(end.outward),
+  });
+
+  const arrivingAt = arriving.map(contribution);
+  const leavingFrom = leaving.map(contribution);
+
+  const sameCell = (a: GridPosition, b: GridPosition) => a[0] === b[0] && a[1] === b[1] && a[2] === b[2];
+
+  const out: ConnectorAdaptation[] = [];
+  const seen = new Set<string>();
+
+  for (const spot of [...arrivingAt, ...leavingFrom]) {
+    const { cell } = spot;
     if (cell[1] < 0) continue;
 
     const occupants = assembly.gridOccupancy.get(`${cell[0]},${cell[1]},${cell[2]}`) ?? [];
@@ -320,35 +349,54 @@ export function adaptiveConnectorFor(
       .filter((id) => id !== support.instanceId)
       .map((id) => assembly.getPartById(id))
       .find((p): p is PlacedPart => !!p && getPartDefinition(p.definitionId)?.category === "connector");
-    if (!connector) continue;
+    if (!connector || seen.has(connector.instanceId)) continue;
 
     const connectorDef = getPartDefinition(connector.definitionId);
     if (!connectorDef) continue;
 
-    // The arm has to point back down the bar that is arriving
-    const arriving = oppositeDirection(end.outward);
-    const ignoreIds = new Set([connector.instanceId, support.instanceId]);
-    const branches = branchDirectionsAt(assembly, cell, ignoreIds);
-    if (!branches.includes(arriving)) branches.push(arriving);
+    // The junction as it will be: everything but the support, plus where the support
+    // will actually reach once dropped
+    const branches = branchDirectionsAt(assembly, cell, ignoreSupport);
+    for (const a of arrivingAt) {
+      if (sameCell(a.cell, cell) && !branches.includes(a.arm)) branches.push(a.arm);
+    }
 
-    // Nothing to adapt if the arriving bar already has an arm to land on. Whether the
-    // connector serves its other branches is not this gesture's business: swapping a
-    // connector the user did not aim at would be a surprise.
     const arms = armDirections(connectorDef, connector.rotation);
-    if (arms.has(arriving)) continue;
+    const missing = branches.filter((d) => !arms.has(d));
+    const wasServing = leavingFrom.find((l) => sameCell(l.cell, cell));
+    const nowServing = arrivingAt.some((a) => sameCell(a.cell, cell) && a.arm === wasServing?.arm);
+    const armFallsIdle = !!wasServing && !branches.includes(wasServing.arm) && !nowServing;
 
-    const fit = connectorsCovering(assembly, cell, branches, ignoreIds, connector)[0];
-    if (!fit) continue;
+    let reason: ConnectorAdaptation["reason"] | null = null;
+    if (missing.length > 0 && arrivingAt.some((a) => sameCell(a.cell, cell) && missing.includes(a.arm))) {
+      reason = "grows";
+    } else if (armFallsIdle && arms.size > branches.length) {
+      reason = "simplifies";
+    }
+    if (!reason) continue;
 
-    return {
+    const fit = connectorsCovering(
+      assembly,
+      cell,
+      branches,
+      new Set([connector.instanceId, support.instanceId]),
+      connector,
+    )[0];
+    if (!fit || (fit.def.id === connector.definitionId && fit.rotation.every((r, i) => r === connector.rotation[i]))) {
+      continue;
+    }
+
+    seen.add(connector.instanceId);
+    out.push({
       instanceId: connector.instanceId,
       cell,
       from: connector.definitionId,
       definitionId: fit.def.id,
       rotation: fit.rotation,
-    };
+      reason,
+    });
   }
-  return null;
+  return out;
 }
 
 /** Bars that can be threaded through a cell along `axis` without an illegal overlap. */

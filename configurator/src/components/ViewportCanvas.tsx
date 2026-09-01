@@ -60,7 +60,7 @@ import {
 import {
   type AttachmentPoint,
   type ConnectorAdaptation,
-  adaptiveConnectorFor,
+  adaptiveConnectorsFor,
   targetCellOf,
 } from "../assembly/compatibility";
 import { settleWithGravity, restOnCollision, placementIsGrounded } from "../assembly/gravity";
@@ -109,8 +109,8 @@ interface ViewportProps {
     newPosition: GridPosition,
     rotation?: Rotation3,
     orientation?: Axis,
-    /** A connector to swap in the same breath, so one gesture is one undo */
-    adaptation?: ConnectorAdaptation | null,
+    /** Connectors to swap in the same breath, so one gesture is one undo */
+    adaptations?: ConnectorAdaptation[],
   ) => void;
   onMoveSelectedParts: (primaryId: string, newPosition: GridPosition, rotation?: Rotation3, orientation?: Axis) => void;
   onClickPart: (instanceId: string, shiftKey: boolean, gridPoint?: GridPosition) => void;
@@ -133,6 +133,7 @@ interface ViewportProps {
   flashDefinitionId: string | null;
   snapEnabled: boolean;
   gravityEnabled: boolean;
+  adaptiveEnabled: boolean;
   showCollisions: boolean;
   fineMeshCollisions: boolean;
 }
@@ -1729,6 +1730,7 @@ function DragPreview({
   selectedPartIds,
   parts,
   onAdaptation,
+  adaptiveEnabled,
 }: {
   dragState: DragState;
   assembly: AssemblyState;
@@ -1743,8 +1745,9 @@ function DragPreview({
   verticalDragRef: React.MutableRefObject<{ active: boolean; used: boolean; y: number }>;
   selectedPartIds: Set<string>;
   parts: PlacedPart[];
-  /** Reports the connector this drop would have to change, so it can be previewed */
-  onAdaptation: (adaptation: ConnectorAdaptation | null) => void;
+  /** Reports the connectors this drop would change, so they can be previewed */
+  onAdaptation: (adaptations: ConnectorAdaptation[]) => void;
+  adaptiveEnabled: boolean;
 }) {
   const grabOffsetRef = useRef<[number, number] | null>(null);
   const partWorldY = gridToWorld(dragState.originalPosition)[1];
@@ -1796,12 +1799,12 @@ function DragPreview({
    * and the connectors around it are usually travelling too.
    */
   useEffect(() => {
-    if (selectedPartIds.size > 1 && selectedPartIds.has(dragState.instanceId)) {
-      onAdaptation(null);
+    if (!adaptiveEnabled || (selectedPartIds.size > 1 && selectedPartIds.has(dragState.instanceId))) {
+      onAdaptation([]);
       return;
     }
     onAdaptation(
-      adaptiveConnectorFor(assembly, {
+      adaptiveConnectorsFor(assembly, {
         instanceId: dragState.instanceId,
         definitionId: dragState.definitionId,
         position: gridPos,
@@ -1810,6 +1813,7 @@ function DragPreview({
       }),
     );
   }, [
+    adaptiveEnabled,
     assembly,
     dragState.instanceId,
     dragState.definitionId,
@@ -1821,7 +1825,7 @@ function DragPreview({
   ]);
 
   // The drop is off once the drag ends, whichever way it ended
-  useEffect(() => () => onAdaptation(null), [onAdaptation]);
+  useEffect(() => () => onAdaptation([]), [onAdaptation]);
 
   if (!def) return null;
 
@@ -2131,9 +2135,10 @@ interface SceneProps extends ViewportProps {
   fadedPartIds: Set<string>;
   /** Off leaves only the bars, so the shape of a structure can be read on its own */
   showConnectors: boolean;
-  /** The connector this drop would change, previewed until the drag ends */
-  adaptation: ConnectorAdaptation | null;
-  onAdaptation: (adaptation: ConnectorAdaptation | null) => void;
+  /** The connectors this drop would change, previewed until the drag ends */
+  adaptations: ConnectorAdaptation[];
+  onAdaptation: (adaptations: ConnectorAdaptation[]) => void;
+  adaptiveEnabled: boolean;
   /** Middle and reach of a multi-part selection, for the rotation rings */
   selectionBody: { centre: [number, number, number]; radius: number } | null;
   onRotateSelectedParts: (axis: 0 | 1 | 2, turns?: 1 | 3) => void;
@@ -2180,8 +2185,9 @@ function Scene({
   selectionBody,
   fadedPartIds,
   showConnectors,
-  adaptation,
+  adaptations,
   onAdaptation,
+  adaptiveEnabled,
   onRotateSelectedParts,
 }: SceneProps) {
   const groundRef = useRef<THREE.Mesh>(null);
@@ -2382,13 +2388,9 @@ function Scene({
           rotation={previewSuggestion.rotation}
         />
       )}
-      {adaptation && (
-        <SuggestionPreview
-          definitionId={adaptation.definitionId}
-          position={adaptation.cell}
-          rotation={adaptation.rotation}
-        />
-      )}
+      {adaptations.map((a) => (
+        <SuggestionPreview key={a.instanceId} definitionId={a.definitionId} position={a.cell} rotation={a.rotation} />
+      ))}
 
       <WorkspaceBounds />
 
@@ -2416,8 +2418,8 @@ function Scene({
         // A replacement ghost stands on this very cell, so the connector it would
         // replace steps aside for it — otherwise the two are drawn into each other
         if (previewSuggestion?.replaces === part.instanceId) return null;
-        // The connector an adaptive drop would change steps aside for its own ghost
-        if (adaptation?.instanceId === part.instanceId) return null;
+        // A connector an adaptive drop would change steps aside for its own ghost
+        if (adaptations.some((a) => a.instanceId === part.instanceId)) return null;
         if (!showConnectors && getPartDefinition(part.definitionId)?.category === "connector") return null;
         const preview = resizePreview && resizePreview.instanceId === part.instanceId ? resizePreview : null;
         const renderPart: PlacedPart = preview ? previewPart(part, preview) : part;
@@ -2505,6 +2507,7 @@ function Scene({
           selectedPartIds={selectedPartIds}
           parts={parts}
           onAdaptation={onAdaptation}
+          adaptiveEnabled={adaptiveEnabled}
         />
       )}
 
@@ -2619,9 +2622,9 @@ export function ViewportCanvas(props: ViewportProps) {
 
   // Drag state
   const [dragState, setDragState] = useState<DragState | null>(null);
-  const [adaptation, setAdaptation] = useState<ConnectorAdaptation | null>(null);
-  const adaptationRef = useRef<ConnectorAdaptation | null>(null);
-  adaptationRef.current = adaptation;
+  const [adaptations, setAdaptations] = useState<ConnectorAdaptation[]>([]);
+  const adaptationsRef = useRef<ConnectorAdaptation[]>([]);
+  adaptationsRef.current = adaptations;
   const dropTargetRef = useRef<{
     position: GridPosition;
     orientation?: Axis;
@@ -3054,11 +3057,11 @@ export function ViewportCanvas(props: ViewportProps) {
             target.position,
             target.rotation,
             target.orientation,
-            adaptationRef.current,
+            adaptationsRef.current,
           );
         }
         setDragState(null);
-        setAdaptation(null);
+        setAdaptations([]);
       } else {
         props.onClickPart(pending.instanceId, e.shiftKey, pending.gridPoint);
       }
@@ -3333,8 +3336,9 @@ export function ViewportCanvas(props: ViewportProps) {
           selectionBody={selectionBody}
           fadedPartIds={fadedPartIds}
           showConnectors={showConnectors}
-          adaptation={adaptation}
-          onAdaptation={setAdaptation}
+          adaptations={adaptations}
+          onAdaptation={setAdaptations}
+          adaptiveEnabled={props.adaptiveEnabled}
           onRotateSelectedParts={props.onRotateSelectedParts}
         />
         {(mirrorMinimap || junctionCell) && (

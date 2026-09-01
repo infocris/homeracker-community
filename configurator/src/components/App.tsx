@@ -28,7 +28,7 @@ import { rotateBlock } from "../assembly/block-rotation";
 import {
   type AttachmentPoint,
   type ConnectorAdaptation,
-  adaptiveConnectorFor,
+  adaptiveConnectorsFor,
   attachmentPointsOf,
   compatiblePartsAt,
   nearestAttachmentPoint,
@@ -140,7 +140,7 @@ assembly.subscribe(() => {
   throughDirectionsAt,
   topologySuggestionsAt,
   replacementSuggestionsAt,
-  adaptiveConnectorFor,
+  adaptiveConnectorsFor,
 };
 (window as any).__gravity = {
   placementCollides,
@@ -390,7 +390,7 @@ export function App() {
       newPosition: GridPosition,
       newRotation?: PlacedPart["rotation"],
       newOrientation?: Axis,
-      adaptation?: ConnectorAdaptation | null,
+      adaptations?: ConnectorAdaptation[],
     ) => {
       const part = assembly.getPartById(instanceId);
       if (!part) return;
@@ -415,59 +415,61 @@ export function App() {
       const definitionId = part.definitionId;
 
       /*
-       * A connector the drop asks to change travels with the move as one command: the
+       * Connectors the drop asks to change travel with the move as one command: the
        * gesture was single, so the undo should be too. Captured by value, since the
-       * part it names will have been reissued by the time undo runs.
+       * parts they name will have been reissued by the time undo runs.
        */
-      const adapted = (() => {
-        if (!adaptation) return null;
+      const adapted = (adaptations ?? []).flatMap((adaptation) => {
         const connector = assembly.getPartById(adaptation.instanceId);
-        if (!connector) return null;
-        return {
-          before: {
-            definitionId: connector.definitionId,
-            position: [...connector.position] as GridPosition,
-            rotation: [...connector.rotation] as Rotation3,
-            orientation: connector.orientation,
-            color: connector.color,
+        if (!connector) return [];
+        return [
+          {
+            before: {
+              definitionId: connector.definitionId,
+              position: [...connector.position] as GridPosition,
+              rotation: [...connector.rotation] as Rotation3,
+              orientation: connector.orientation,
+              color: connector.color,
+            },
+            after: {
+              definitionId: adaptation.definitionId,
+              position: [...adaptation.cell] as GridPosition,
+              rotation: adaptation.rotation,
+              orientation: connector.orientation,
+              color: connector.color,
+            },
           },
-          after: {
-            definitionId: adaptation.definitionId,
-            position: [...adaptation.cell] as GridPosition,
-            rotation: adaptation.rotation,
-            orientation: connector.orientation,
-            color: connector.color,
-          },
-        };
-      })();
+        ];
+      });
 
       const cmd: Command = {
-        description: adapted ? `Move ${definitionId} and adapt ${adapted.after.definitionId}` : `Move ${definitionId}`,
+        description:
+          adapted.length > 0 ? `Move ${definitionId} and adapt ${adapted.length} connector(s)` : `Move ${definitionId}`,
         execute() {
           removeMatchingParts([
             { definitionId, position: oldPosition, rotation: oldRotation, orientation: oldOrientation },
           ]);
-          if (adapted) {
-            removeMatchingParts([adapted.before]);
+          for (const swap of adapted) {
+            removeMatchingParts([swap.before]);
             assembly.addPart(
-              adapted.after.definitionId,
-              adapted.after.position,
-              adapted.after.rotation,
-              adapted.after.orientation,
-              adapted.after.color,
+              swap.after.definitionId,
+              swap.after.position,
+              swap.after.rotation,
+              swap.after.orientation,
+              swap.after.color,
             );
           }
           assembly.addPart(definitionId, newPosition, rotation, orientation, oldColor);
         },
         undo() {
-          if (adapted) {
-            removeMatchingParts([adapted.after]);
+          for (const swap of adapted) {
+            removeMatchingParts([swap.after]);
             assembly.addPart(
-              adapted.before.definitionId,
-              adapted.before.position,
-              adapted.before.rotation,
-              adapted.before.orientation,
-              adapted.before.color,
+              swap.before.definitionId,
+              swap.before.position,
+              swap.before.rotation,
+              swap.before.orientation,
+              swap.before.color,
             );
           }
           // Find the part at the new position and move it back
@@ -1358,6 +1360,10 @@ export function App() {
     input.click();
   }, [handleSetInventory]);
 
+  const handleToggleAdaptive = useCallback(() => {
+    assembly.setAdaptiveEnabled(!assembly.adaptiveEnabled);
+  }, []);
+
   const handleToggleGravity = useCallback(() => {
     assembly.setGravityEnabled(!assembly.gravityEnabled);
   }, []);
@@ -1529,6 +1535,8 @@ export function App() {
           onToggleSnap={handleToggleSnap}
           gravityEnabled={snapshot.gravityEnabled}
           onToggleGravity={handleToggleGravity}
+          adaptiveEnabled={snapshot.adaptiveEnabled}
+          onToggleAdaptive={handleToggleAdaptive}
           showCollisions={snapshot.showCollisions}
           onToggleCollisions={handleToggleCollisions}
           fineMeshCollisions={snapshot.fineMeshCollisions}
@@ -1564,6 +1572,7 @@ export function App() {
           flashDefinitionId={flashDefinitionId}
           snapEnabled={snapshot.snapEnabled}
           gravityEnabled={snapshot.gravityEnabled}
+          adaptiveEnabled={snapshot.adaptiveEnabled}
           showCollisions={snapshot.showCollisions}
           fineMeshCollisions={snapshot.fineMeshCollisions}
         />

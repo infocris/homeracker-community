@@ -15,6 +15,8 @@ interface ToolbarProps {
   onToggleSnap: () => void;
   gravityEnabled: boolean;
   onToggleGravity: () => void;
+  adaptiveEnabled: boolean;
+  onToggleAdaptive: () => void;
   showCollisions: boolean;
   onToggleCollisions: () => void;
   fineMeshCollisions: boolean;
@@ -41,6 +43,8 @@ export function Toolbar({
   onToggleSnap,
   gravityEnabled,
   onToggleGravity,
+  adaptiveEnabled,
+  onToggleAdaptive,
   showCollisions,
   onToggleCollisions,
   fineMeshCollisions,
@@ -120,6 +124,13 @@ export function Toolbar({
           title="Parts rest on what is below them, and fall to the ground when nothing is"
         >
           Gravity: {gravityEnabled ? "On" : "Off"}
+        </button>
+        <button
+          className={`toolbar-btn${!adaptiveEnabled ? " toolbar-btn-active" : ""}`}
+          onClick={onToggleAdaptive}
+          title="A connector grows an arm for a bar dropped into it, and drops back to the tightest fit when one is pulled away"
+        >
+          Adaptive: {adaptiveEnabled ? "On" : "Off"}
         </button>
         <button
           className={`toolbar-btn${showCollisions ? " toolbar-btn-active" : ""}`}
