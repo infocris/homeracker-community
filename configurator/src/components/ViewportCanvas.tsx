@@ -114,6 +114,8 @@ interface ViewportProps {
   ) => void;
   onMoveSelectedParts: (primaryId: string, newPosition: GridPosition, rotation?: Rotation3, orientation?: Axis) => void;
   onClickPart: (instanceId: string, shiftKey: boolean, gridPoint?: GridPosition) => void;
+  /** The cell the coming turn pivots about, so the rings show what will happen */
+  rotationPivot: GridPosition | null;
   /** Parts held in place — selectable and clickable, but not draggable */
   lockedPartIds: Set<string>;
   onLockedPartDrag: () => void;
@@ -548,10 +550,35 @@ function SuggestionPreview({
 }
 
 /** Colour per axis on the rotation rings: the same three the app uses for x, y, z. */
-const AXIS_RING_COLOR = ["#ff5a5a", "#5aff8f", "#5a9dff"];
-/** The keys that turn about x, y and z — the same ones the shortcuts use. */
-const AXIS_RING_LABEL = ["T", "R", "F"];
-const AXIS_RING_AXIS = ["x", "y", "z"];
+/** Colour by the key, not the axis: a ring badged X is red wherever the camera stands. */
+const KEY_COLOR: Record<"X" | "Y" | "Z", string> = { X: "#ff5a5a", Y: "#5aff8f", Z: "#5a9dff" };
+/** The plane each ring draws, named by the axes that span it. */
+const AXIS_RING_PLANE = ["yz", "xz", "xy"];
+
+/**
+ * Which axis each rotation key turns about, from where the camera stands.
+ *
+ * X is the plane parallel to the ground, which needs no point of view — it is the same
+ * plane from anywhere. The two upright planes are another matter: which one is "the"
+ * vertical turn depends entirely on where you are standing, so Y is the one whose plane
+ * faces the camera, turning the part the way a clock hand turns on the screen, and Z is
+ * the one running away from it, tipping the part toward or away from you.
+ */
+function rotationAxesFromCamera(camera: THREE.Camera): { x: 0 | 1 | 2; y: 0 | 1 | 2; z: 0 | 1 | 2 } {
+  const forward = new THREE.Vector3();
+  camera.getWorldDirection(forward);
+  // Of the two ground axes, the one pointing more nearly along the line of sight is the
+  // one a turn about it appears to happen in the plane of the screen
+  const intoScreen = Math.abs(forward.x) >= Math.abs(forward.z) ? 0 : 2;
+  return { x: 1, y: intoScreen as 0 | 2, z: (intoScreen === 0 ? 2 : 0) as 0 | 2 };
+}
+
+/** The key that drives the ring turning about this axis, for the camera as it stands. */
+function keyForAxis(camera: THREE.Camera, axis: 0 | 1 | 2): "X" | "Y" | "Z" {
+  const axes = rotationAxesFromCamera(camera);
+  if (axis === axes.x) return "X";
+  return axis === axes.y ? "Y" : "Z";
+}
 
 /**
  * Where each ring carries its shortcut, as a unit vector scaled by the radius. Each
@@ -651,15 +678,27 @@ const AXIS_QUARTER_TURN: Rotation3[] = [
  */
 function RotationHandles({
   centre,
-  radius,
+  radii,
   onRotate,
 }: {
   centre: [number, number, number];
-  radius: number;
+  /** One radius per axis: how far the body reaches in that axis's plane of turn */
+  radii: [number, number, number];
   onRotate: (axis: 0 | 1 | 2, turns: 1 | 3) => void;
 }) {
   const [hovered, setHovered] = useState<number | null>(null);
   const camera = useThree((state) => state.camera);
+
+  /*
+   * Which key drives which ring depends on where the camera stands, so the badges have
+   * to follow it round. Checked each frame but only written when the answer actually
+   * changes, which happens when the camera crosses a diagonal and not otherwise.
+   */
+  const [keys, setKeys] = useState<("X" | "Y" | "Z")[]>(() => [0, 1, 2].map((a) => keyForAxis(camera, a as 0 | 1 | 2)));
+  useFrame(() => {
+    const next = [0, 1, 2].map((a) => keyForAxis(camera, a as 0 | 1 | 2)) as ("X" | "Y" | "Z")[];
+    if (next.some((k, i) => k !== keys[i])) setKeys(next);
+  });
   // Perpendicular to the axis it turns about: the ring lies in the plane of the turn
   const lie: [number, number, number][] = [
     [0, Math.PI / 2, 0],
@@ -678,7 +717,7 @@ function RotationHandles({
   const screenSweep = (axis: 0 | 1 | 2): number => {
     const probe = KEY_BADGE_LATTICE[axis];
     const turned = rotateGridCells([probe], AXIS_QUARTER_TURN[axis])[0];
-    const scale = radius / Math.hypot(probe[0], probe[1], probe[2]);
+    const scale = radii[axis] / Math.hypot(probe[0], probe[1], probe[2]);
     const at = (v: GridPosition) =>
       new THREE.Vector3(centre[0] + v[0] * scale, centre[1] + v[1] * scale, centre[2] + v[2] * scale).project(camera);
     return at(turned).x - at(probe).x;
@@ -697,9 +736,9 @@ function RotationHandles({
           and take no clicks, so nothing they pass in front of becomes unreachable. */}
       {[0, 1, 2].map((axis) => (
         <mesh key={axis} rotation={lie[axis]} raycast={() => {}}>
-          <torusGeometry args={[radius, BASE_UNIT * (hovered === axis ? 0.11 : 0.06), 8, 48]} />
+          <torusGeometry args={[radii[axis], BASE_UNIT * (hovered === axis ? 0.11 : 0.06), 8, 48]} />
           <meshBasicMaterial
-            color={AXIS_RING_COLOR[axis]}
+            color={KEY_COLOR[keys[axis]]}
             transparent
             opacity={hovered === axis ? 0.95 : 0.4}
             depthWrite={false}
@@ -712,7 +751,7 @@ function RotationHandles({
       {[0, 1, 2].map((axis) => (
         <Html
           key={axis}
-          position={KEY_BADGE_AT[axis].map((u) => u * radius) as [number, number, number]}
+          position={KEY_BADGE_AT[axis].map((u) => u * radii[axis]) as [number, number, number]}
           center
           zIndexRange={[16, 10]}
           style={{ pointerEvents: "none" }}
@@ -721,11 +760,11 @@ function RotationHandles({
             type="button"
             className="rotation-key"
             style={{
-              color: AXIS_RING_COLOR[axis],
+              color: KEY_COLOR[keys[axis]],
               opacity: hovered === null || hovered === axis ? 1 : 0.5,
               pointerEvents: "auto",
             }}
-            title={`Quarter turn about ${AXIS_RING_AXIS[axis]} (${AXIS_RING_LABEL[axis]}) — left sweeps one way, right the other`}
+            title={`Quarter turn in the ${AXIS_RING_PLANE[axis]} plane (${keys[axis]}) — left sweeps one way, right the other`}
             /*
              * R3F listens on the canvas container, which is an ancestor of this
              * overlay, so an unstopped event would also be raycast into the scene and
@@ -749,20 +788,20 @@ function RotationHandles({
             onPointerEnter={() => setHovered(axis)}
             onPointerLeave={() => setHovered(null)}
           >
-            {AXIS_RING_LABEL[axis]}
+            {keys[axis]}
           </button>
         </Html>
       ))}
 
       {hovered !== null && (
         <Html
-          position={[0, radius + BASE_UNIT * 0.75, 0]}
+          position={[0, Math.max(...radii) + BASE_UNIT * 0.75, 0]}
           center
           zIndexRange={[15, 10]}
           style={{ pointerEvents: "none" }}
         >
           <span className="dimension-label">
-            {AXIS_RING_LABEL[hovered]} · quarter turn about {AXIS_RING_AXIS[hovered]} · shift to reverse
+            {keys[hovered]} · quarter turn in the {AXIS_RING_PLANE[hovered]} plane
           </span>
         </Html>
       )}
@@ -1471,6 +1510,14 @@ function useGhostSnap({
   /** Optional ref written synchronously inside useFrame so click handlers
    *  always read the latest computed state without waiting for a React render. */
   syncRef,
+  /**
+   * Whether a snap may still aim the part for you. It stops as soon as the part has
+   * been turned by hand: the aiming is a suggestion on arrival, not a grip. Left on,
+   * it recomputes every frame and quietly puts back its own choice, so pressing a
+   * rotation key only ever picked between equally-aimed orientations — the part could
+   * not be turned at all.
+   */
+  autoAim = true,
 }: {
   definitionId: string;
   assembly: AssemblyState;
@@ -1478,6 +1525,7 @@ function useGhostSnap({
   ghostRotation: Rotation3;
   yLift: number;
   snapEnabled: boolean;
+  autoAim?: boolean;
   cursorOffset?: GridPosition;
   planeY?: number;
   initialPosition?: GridPosition;
@@ -1543,12 +1591,9 @@ function useGhostSnap({
         : findBestConnectorSnap(assembly, definitionId, snapPos, 3, gridRay, ghostRotation)
       : null;
 
-    const snapOrient = snap ? (isSupport ? snap.orientation : ghostOrientation) : ghostOrientation;
-    const snapRotation: Rotation3 = snap
-      ? isSupport
-        ? [0, 0, 0]
-        : (snap.autoRotation ?? ghostRotation)
-      : ghostRotation;
+    const snapOrient = snap && autoAim && isSupport ? snap.orientation : ghostOrientation;
+    const snapRotation: Rotation3 =
+      snap && autoAim ? (isSupport ? [0, 0, 0] : (snap.autoRotation ?? ghostRotation)) : ghostRotation;
 
     // Under gravity a socket is not enough: a downward socket can point through the
     // floor, and the span it implies can run straight through another part.
@@ -1657,6 +1702,7 @@ function GhostPreview({
   ghostOrientation,
   ghostRotation,
   ghostStateRef,
+  autoAim,
   yLift,
   snapEnabled,
   gravityEnabled,
@@ -1667,6 +1713,8 @@ function GhostPreview({
   ghostOrientation: Axis;
   ghostRotation: Rotation3;
   ghostStateRef: React.MutableRefObject<GhostState>;
+  /** False once the part has been turned by hand: the snap stops aiming it */
+  autoAim: boolean;
   yLift: number;
   snapEnabled: boolean;
   gravityEnabled: boolean;
@@ -1682,6 +1730,7 @@ function GhostPreview({
     snapEnabled,
     gravityIgnoreIds: gravityEnabled ? noParts : undefined,
     syncRef: ghostStateRef,
+    autoAim,
   });
 
   if (!def) return null;
@@ -1731,6 +1780,7 @@ function DragPreview({
   parts,
   onAdaptation,
   adaptiveEnabled,
+  autoAim,
 }: {
   dragState: DragState;
   assembly: AssemblyState;
@@ -1748,6 +1798,8 @@ function DragPreview({
   /** Reports the connectors this drop would change, so they can be previewed */
   onAdaptation: (adaptations: ConnectorAdaptation[]) => void;
   adaptiveEnabled: boolean;
+  /** False once the part has been turned by hand: the snap stops aiming it */
+  autoAim: boolean;
 }) {
   const grabOffsetRef = useRef<[number, number] | null>(null);
   const partWorldY = gridToWorld(dragState.originalPosition)[1];
@@ -1772,6 +1824,7 @@ function DragPreview({
     grabOffsetRef,
     gravityIgnoreIds,
     verticalDragRef,
+    autoAim,
   });
 
   // Keep dropTargetRef in sync
@@ -2135,12 +2188,14 @@ interface SceneProps extends ViewportProps {
   fadedPartIds: Set<string>;
   /** Off leaves only the bars, so the shape of a structure can be read on its own */
   showConnectors: boolean;
+  /** False once the part in hand has been turned by hand: the snap stops aiming it */
+  autoAim: boolean;
   /** The connectors this drop would change, previewed until the drag ends */
   adaptations: ConnectorAdaptation[];
   onAdaptation: (adaptations: ConnectorAdaptation[]) => void;
   adaptiveEnabled: boolean;
   /** Middle and reach of a multi-part selection, for the rotation rings */
-  selectionBody: { centre: [number, number, number]; radius: number } | null;
+  selectionBody: { centre: [number, number, number]; radii: [number, number, number] } | null;
   onRotateSelectedParts: (axis: 0 | 1 | 2, turns?: 1 | 3) => void;
 }
 
@@ -2185,6 +2240,7 @@ function Scene({
   selectionBody,
   fadedPartIds,
   showConnectors,
+  autoAim,
   adaptations,
   onAdaptation,
   adaptiveEnabled,
@@ -2452,7 +2508,7 @@ function Scene({
       })}
 
       {selectionBody && mode.type === "select" && !dragState && (
-        <RotationHandles centre={selectionBody.centre} radius={selectionBody.radius} onRotate={onRotateSelectedParts} />
+        <RotationHandles centre={selectionBody.centre} radii={selectionBody.radii} onRotate={onRotateSelectedParts} />
       )}
 
       {selectedResizable && mode.type === "select" && !dragState && (
@@ -2487,6 +2543,7 @@ function Scene({
           ghostOrientation={ghostOrientation}
           ghostRotation={ghostRotation}
           ghostStateRef={ghostStateRef}
+          autoAim={autoAim}
           yLift={yLift}
           snapEnabled={snapEnabled}
           gravityEnabled={gravityEnabled}
@@ -2508,6 +2565,7 @@ function Scene({
           parts={parts}
           onAdaptation={onAdaptation}
           adaptiveEnabled={adaptiveEnabled}
+          autoAim={autoAim}
         />
       )}
 
@@ -2737,6 +2795,11 @@ export function ViewportCanvas(props: ViewportProps) {
     if (props.mode.type !== "draw") setDrawDrag(null);
   }, [props.mode.type]);
 
+  // A fresh gesture gets the aiming back: it is given up only for the one in progress
+  useEffect(() => {
+    setAutoAim(true);
+  }, [props.mode]);
+
   /**
    * Connectors touching a selected support, ghosted so the bar reads whole.
    *
@@ -2773,7 +2836,20 @@ export function ViewportCanvas(props: ViewportProps) {
     return faded;
   }, [props.selectedPartIds, props.parts, props.assembly]);
 
-  /** Middle of the selection and how far it reaches, in world units. */
+  /**
+   * The pivot of the turn the rings offer, and how far the body reaches around it in
+   * each plane of turn.
+   *
+   * Both matter for the rings to mean anything: a circle drawn round the middle of a
+   * body that actually swings about its end says the wrong thing twice over. The
+   * centre is the point the turn holds still, and each radius reaches the far side of
+   * what moves, so the circle is the path that part travels rather than a hoop around
+   * the scene.
+   *
+   * The pivot is handed down rather than worked out again here: the turn and the ring
+   * that offers it have to be about the same point, and computing it twice is how they
+   * would come to disagree.
+   */
   const selectionBody = useMemo(() => {
     if (props.selectedPartIds.size === 0) return null;
     const selected = props.parts.filter((p) => props.selectedPartIds.has(p.instanceId));
@@ -2791,21 +2867,29 @@ export function ViewportCanvas(props: ViewportProps) {
     }
     if (!Number.isFinite(min[0])) return null;
 
-    const centre = gridToWorld([(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2]);
+    const pivot = props.rotationPivot;
+    if (!pivot) return null;
+    const pivotCell: [number, number, number] = [pivot[0], pivot[1], pivot[2]];
+    const centre = gridToWorld(pivotCell);
+
+    // Reach of the body from the pivot, per plane: the farthest corner of the box,
+    // measured in the two axes that plane turns in
+    const away = [0, 1, 2].map((i) => Math.max(Math.abs(min[i] - pivotCell[i]), Math.abs(max[i] - pivotCell[i])));
+    const inPlane = (a: number, b: number) => Math.hypot(away[a], away[b]) * BASE_UNIT;
+
     /*
-     * Just clear of the body, with a floor so a small selection still gets a ring big
-     * enough to aim at. Enclosing keeps the rings clickable; the margin is small so
-     * they read as a control on the selection rather than a hoop around the scene.
-     *
-     * A lone support also carries length handles at its ends, and at the default
-     * margin the ring runs straight through them and takes their clicks. The margin
-     * widens to clear the handle balls when they are there.
+     * A lone support carries length handles at its ends, and a ring running through
+     * them takes their clicks, so it stands a little further out in that case. The
+     * floor keeps a single-cell selection's rings big enough to aim at.
      */
-    const sharesWithHandles = selected.length === 1 && !!resizeEnvelopeOf(selected[0]);
-    const margin = BASE_UNIT * (sharesWithHandles ? 0.95 : 0.35);
-    const span = Math.max(max[0] - min[0], max[1] - min[1], max[2] - min[2]) + 1;
-    return { centre, radius: Math.max((span * BASE_UNIT) / 2 + margin, BASE_UNIT * 1.4) };
-  }, [props.selectedPartIds, props.parts]);
+    const clear = BASE_UNIT * (selected.length === 1 && resizeEnvelopeOf(selected[0]) ? 0.95 : 0.3);
+    const radius = (raw: number) => Math.max(raw + clear, BASE_UNIT * 1.4);
+
+    return {
+      centre,
+      radii: [radius(inPlane(1, 2)), radius(inPlane(0, 2)), radius(inPlane(0, 1))] as [number, number, number],
+    };
+  }, [props.selectedPartIds, props.parts, props.rotationPivot]);
 
   const selectedResizable = useMemo(() => {
     if (props.selectedPartIds.size !== 1) return null;
@@ -2909,7 +2993,14 @@ export function ViewportCanvas(props: ViewportProps) {
     setYLift(0);
   }, [placingId]);
 
+  /**
+   * Whether a snap may still aim the part being placed or dragged. Any turn by hand
+   * gives it up for the rest of the gesture, and it comes back with the next one.
+   */
+  const [autoAim, setAutoAim] = useState(true);
+
   const rotateAxis = useCallback((axis: 0 | 1 | 2) => {
+    setAutoAim(false);
     setGhostRotation((prev) => {
       const next: Rotation3 = [...prev];
       next[axis] = nextStep(next[axis]);
@@ -2993,6 +3084,7 @@ export function ViewportCanvas(props: ViewportProps) {
             used: !!pending.vertical,
             y: part.position[1],
           };
+          setAutoAim(true);
           setDragState({
             instanceId: part.instanceId,
             definitionId: part.definitionId,
@@ -3106,23 +3198,23 @@ export function ViewportCanvas(props: ViewportProps) {
         props.onDeleteSelected();
       } else if (dragState) {
         const rotateDrag = (axis: 0 | 1 | 2) => {
+          setAutoAim(false);
           const next: Rotation3 = [...dragState.rotation];
           next[axis] = nextStep(next[axis]);
           setDragState({ ...dragState, rotation: next });
         };
         switch (e.key.toLowerCase()) {
-          case "r":
-            rotateDrag(1);
+          case "x":
+          case "y":
+          case "z": {
+            const camera = (window as any).__camera as THREE.Camera | undefined;
+            if (camera) rotateDrag(rotationAxesFromCamera(camera)[e.key.toLowerCase() as "x" | "y" | "z"]);
             break;
-          case "f":
-            rotateDrag(2);
-            break;
-          case "t":
-            rotateDrag(0);
-            break;
+          }
           case "o": {
             const def = getPartDefinition(dragState.definitionId);
             if (def?.category === "support") {
+              setAutoAim(false);
               const newOrient = nextOrientation(dragState.orientation ?? "y");
               setDragState({ ...dragState, orientation: newOrient });
             }
@@ -3136,7 +3228,7 @@ export function ViewportCanvas(props: ViewportProps) {
             break;
         }
       } else if (props.mode.type === "select" && props.selectedPartIds.size > 0) {
-        // Arrow key nudge, W/S lift, and R/T/F/O rotation for selected parts
+        // Arrow key nudge, W/S lift, X/Y/Z rotation and O orientation for the selection
         const fine = e.shiftKey ? 0.05 : 1;
         if (ARROW_KEYS.has(e.key)) {
           e.preventDefault();
@@ -3157,18 +3249,19 @@ export function ViewportCanvas(props: ViewportProps) {
           case "S":
             props.onNudgeParts(0, -fine, 0);
             break;
-          case "r":
-          case "R":
-            props.onRotateSelectedParts(1);
+          case "x":
+          case "X":
+          case "y":
+          case "Y":
+          case "z":
+          case "Z": {
+            const camera = (window as any).__camera as THREE.Camera | undefined;
+            if (camera) {
+              const axis = rotationAxesFromCamera(camera)[e.key.toLowerCase() as "x" | "y" | "z"];
+              props.onRotateSelectedParts(axis, e.shiftKey ? 3 : 1);
+            }
             break;
-          case "t":
-          case "T":
-            props.onRotateSelectedParts(0);
-            break;
-          case "f":
-          case "F":
-            props.onRotateSelectedParts(2);
-            break;
+          }
           case "o":
           case "O":
             props.onOrientSelectedParts();
@@ -3176,17 +3269,16 @@ export function ViewportCanvas(props: ViewportProps) {
         }
       } else if (props.mode.type === "place" || props.mode.type === "paste") {
         switch (e.key.toLowerCase()) {
-          case "r":
-            rotateAxis(1);
+          case "x":
+          case "y":
+          case "z": {
+            const camera = (window as any).__camera as THREE.Camera | undefined;
+            if (camera) rotateAxis(rotationAxesFromCamera(camera)[e.key.toLowerCase() as "x" | "y" | "z"]);
             break;
-          case "f":
-            rotateAxis(2);
-            break;
-          case "t":
-            rotateAxis(0);
-            break;
+          }
           case "o":
             if (isPlacingSupport) {
+              setAutoAim(false);
               setGhostOrientation((prev) => nextOrientation(prev));
             }
             break;
@@ -3288,7 +3380,7 @@ export function ViewportCanvas(props: ViewportProps) {
   } else if (props.mode.type === "select" && props.selectedPartIds.size > 0) {
     hintText = selectedResizable
       ? "Drag face handles to resize · Suggested parts appear on the right · Del delete · Right-click or Esc deselect"
-      : "Arrow keys nudge · Shift+arrow fine nudge · w/s up and down - ctrl-c/v copy/paste - Del delete · Right-click or Esc deselect";
+      : "Arrow keys nudge · Shift+arrow fine nudge · w/s up and down · x/y/z turn in the xz, xy and yz planes, shift to reverse · ctrl-c/v copy/paste · Del delete · Right-click or Esc deselect";
   } else if (props.mode.type === "paste") {
     hintText = `Click to paste ${props.mode.clipboard.parts.length} part(s) · T(X) R(Y) F(Z) rotate · Esc cancel`;
   }
@@ -3336,6 +3428,7 @@ export function ViewportCanvas(props: ViewportProps) {
           selectionBody={selectionBody}
           fadedPartIds={fadedPartIds}
           showConnectors={showConnectors}
+          autoAim={autoAim}
           adaptations={adaptations}
           onAdaptation={setAdaptations}
           adaptiveEnabled={props.adaptiveEnabled}

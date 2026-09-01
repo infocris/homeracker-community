@@ -45,7 +45,7 @@ const composedCache = new Map<string, Rotation3 | null>();
  * so the answer holds whatever order the triple is applied in and whatever sense each
  * step turns in — and there are only 64 candidates, cached on first use.
  */
-export function composeBodyTurn(rotation: Rotation3, axis: 0 | 1 | 2, turns: 1 | 3): Rotation3 | null {
+export function composeBodyTurn(rotation: Rotation3, axis: 0 | 1 | 2, turns: 1 | 2 | 3): Rotation3 | null {
   const cacheKey = `${rotation.join(",")}|${axis}|${turns}`;
   const hit = composedCache.get(cacheKey);
   if (hit !== undefined) return hit;
@@ -73,6 +73,12 @@ export type TurnedPart = {
  * its new place — the caller refuses the whole turn, since a body that comes apart is
  * worse than one that does not move.
  *
+ * Nothing is done about the ground. A quarter turn about a level axis can send part of
+ * a body under the floor, and lifting it clear would carry it out of the very plane it
+ * was turning in — the plane each ring draws. The caller refuses such a turn instead,
+ * which also makes four quarter turns come back exactly wherever a turn is allowed at
+ * all, rather than only when the body is clear of the ground.
+ *
  * The pivot is rounded to a cell. A body of even extent has its true centre on a cell
  * boundary, and turning about that lands half its cells off the lattice; rounding
  * costs at most half a cell of drift and keeps every part on the grid.
@@ -80,8 +86,15 @@ export type TurnedPart = {
 export function rotateBlock(
   parts: PlacedPart[],
   axis: 0 | 1 | 2,
-  turns: 1 | 3,
-  seatOnGround = false,
+  /** Quarter turns to make, in the direction asked for: 2 is the half turn between */
+  turns: 1 | 2 | 3,
+  /**
+   * The cell to turn about, when the caller has one in mind. A lone part turns about
+   * its own anchor, so its far end sweeps the ring through four distinct places like a
+   * clock hand; about the middle instead, a symmetric bar would fall back onto its own
+   * cells at half a turn and only ever show two.
+   */
+  pivotOverride?: GridPosition,
 ): TurnedPart[] | null {
   if (parts.length === 0) return null;
 
@@ -117,7 +130,7 @@ export function rotateBlock(
   const roundedCentre = (lo: GridPosition, hi: GridPosition): GridPosition =>
     [0, 1, 2].map((i) => Math.round((lo[i] + hi[i]) / 2)) as GridPosition;
 
-  const pivot = roundedCentre(min, max);
+  const pivot = pivotOverride ?? roundedCentre(min, max);
   const turnAbout = (cell: GridPosition): GridPosition => {
     const offset = turnCells([[cell[0] - pivot[0], cell[1] - pivot[1], cell[2] - pivot[2]]], axis, turns)[0];
     return [pivot[0] + offset[0], pivot[1] + offset[1], pivot[2] + offset[2]];
@@ -135,7 +148,9 @@ export function rotateBlock(
       }
     }
   }
-  const landedPivot = roundedCentre(landedMin, landedMax);
+  // A pivot the caller named is a cell already, and turning about a cell is exact and
+  // reversible on its own — only the deduced pivot needs putting back where it was
+  const landedPivot = pivotOverride ?? roundedCentre(landedMin, landedMax);
   const anchor: GridPosition = [pivot[0] - landedPivot[0], pivot[1] - landedPivot[1], pivot[2] - landedPivot[2]];
   const turnAboutSnapped = (cell: GridPosition): GridPosition => {
     const t = turnAbout(cell);
@@ -202,28 +217,5 @@ export function rotateBlock(
     out.push(placed);
   }
 
-  return seatOnGround ? seatBody(out, "seat") : seatBody(out, "lift");
-}
-
-/**
- * Settles a turned body against the ground.
- *
- * A quarter turn about a level axis swings half the body under the floor, so `lift`
- * is the least that has to happen — without it every such turn would be refused for
- * leaving the buildable area. Under gravity the body is `seat`ed instead, brought
- * down as well as up, since a rack tipped on its side comes to rest on the floor
- * rather than hanging where the arithmetic left it.
- */
-function seatBody(turned: TurnedPart[], mode: "lift" | "seat"): TurnedPart[] {
-  let floor = Number.POSITIVE_INFINITY;
-  for (const t of turned) {
-    const def = getPartDefinition(t.definitionId);
-    if (!def) continue;
-    for (const cell of getWorldCells(rotateGridCells(def.gridCells, t.rotation), t.position, t.orientation ?? "y")) {
-      if (cell[1] < floor) floor = cell[1];
-    }
-  }
-  if (!Number.isFinite(floor) || floor === 0) return turned;
-  if (mode === "lift" && floor > 0) return turned;
-  return turned.map((t) => ({ ...t, position: [t.position[0], t.position[1] - floor, t.position[2]] as GridPosition }));
+  return out;
 }

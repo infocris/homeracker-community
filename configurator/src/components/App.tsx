@@ -195,6 +195,45 @@ function removeMatchingParts(specs: PartSpec[]): void {
   }
 }
 
+/**
+ * The cell the next turn pivots about: a spot picked on the part if there is one, the
+ * pivot a run of turns is already holding, a lone part's own anchor, or the cell
+ * nearest the middle of a set turning as one body.
+ *
+ * A plain function, so the turn and the rings that offer it read the same answer from
+ * the same inputs. Going through a ref assigned during render was not reliable — the
+ * handler could see a value from a different render than the one the rings were drawn
+ * from, and the pivot then walked a cell at every other turn.
+ */
+function resolveRotationPivot(
+  selected: PlacedPart[],
+  point: AttachmentPoint | null,
+  held: { ids: string[]; cell: GridPosition } | null,
+): GridPosition | null {
+  if (selected.length === 0) return null;
+  if (point && selected.length === 1) return [...point.cell] as GridPosition;
+
+  const ids = new Set(selected.map((p) => p.instanceId));
+  if (held && held.ids.length === selected.length && held.ids.every((id) => ids.has(id))) {
+    return [...held.cell] as GridPosition;
+  }
+
+  if (selected.length === 1) return [...selected[0].position] as GridPosition;
+
+  const min: GridPosition = [Infinity, Infinity, Infinity];
+  const max: GridPosition = [-Infinity, -Infinity, -Infinity];
+  for (const part of selected) {
+    const bounds = placedPartBounds(part);
+    if (!bounds) continue;
+    for (let i = 0; i < 3; i++) {
+      min[i] = Math.min(min[i], bounds.min[i]);
+      max[i] = Math.max(max[i], bounds.min[i] + bounds.size[i] - 1);
+    }
+  }
+  if (!Number.isFinite(min[0])) return null;
+  return [0, 1, 2].map((i) => Math.round((min[i] + max[i]) / 2)) as GridPosition;
+}
+
 /** The part standing at this definition and position — how a moved part's new id is found */
 function findPlacedPart(definitionId: string, position: GridPosition): PlacedPart | undefined {
   return assembly
@@ -266,6 +305,17 @@ export function App() {
   // The move handlers are deliberately dependency-free and outlive any one render,
   // so they read the lock through a ref rather than closing over a stale set
   const lockedPartIdsRef = useRef<Set<string>>(new Set());
+  /**
+   * The cell a run of turns keeps turning about, with the selection it belongs to.
+   *
+   * A turn reissues the parts it moves, and a part's anchor is the min corner of its
+   * cells — which the turn moves. Taking the pivot from the anchor each time therefore
+   * made it walk: three turns about "the same" point left the part four cells from
+   * where it started. Holding it fixes that, and storing it against the ids it was
+   * computed for means selecting anything else drops it without a word from anyone.
+   */
+  const heldPivotRef = useRef<{ ids: string[]; cell: GridPosition } | null>(null);
+  const selectedPointRef = useRef<AttachmentPoint | null>(null);
 
   const lockedPartIds = useMemo(() => {
     const ids = new Set<string>();
@@ -683,8 +733,6 @@ export function App() {
     [selectedPartIds, shiftParts],
   );
 
-  const nextStep = (step: RotationStep): RotationStep => (step === 0 ? 90 : step === 90 ? 180 : step === 180 ? 270 : 0);
-
   /** Slide the whole assembly so it stands in the middle of the buildable area. */
   const handleCentreAssembly = useCallback(() => {
     const parts = assembly.getAllParts();
@@ -746,41 +794,38 @@ export function App() {
       const selected = [...selectedPartIds].map((id) => assembly.getPartById(id)).filter((p): p is PlacedPart => !!p);
       if (selected.length === 0) return;
 
-      const turned =
-        selected.length === 1
-          ? [
-              {
-                id: selected[0].instanceId,
-                definitionId: selected[0].definitionId,
-                position: selected[0].position,
-                // A lone part turns on the spot, which is what the shortcut has always
-                // done and what its own handles are anchored to
-                rotation: (() => {
-                  const next: Rotation3 = [...selected[0].rotation];
-                  for (let i = 0; i < turns; i++) next[axis] = nextStep(next[axis]);
-                  return next;
-                })(),
-                orientation: selected[0].orientation,
-                color: selected[0].color,
-              },
-            ]
-          : rotateBlock(selected, axis, turns, snapshot.gravityEnabled);
+      const pivot = resolveRotationPivot(selected, selectedPointRef.current, heldPivotRef.current) ?? undefined;
 
-      if (!turned) {
-        setToast("That turn cannot be expressed on the grid");
-        setTimeout(() => setToast(null), 2500);
-        return;
+      /** Whether every part of a turned body still stands inside the buildable area */
+      const fits = (candidate: ReturnType<typeof rotateBlock>) =>
+        !!candidate &&
+        candidate.every((t) => {
+          const def = getPartDefinition(t.definitionId);
+          if (!def) return true;
+          const bounded = clampToWorkspace(rotateGridCells(def.gridCells, t.rotation), t.position, t.orientation);
+          return bounded[0] === t.position[0] && bounded[1] === t.position[1] && bounded[2] === t.position[2];
+        });
+
+      /*
+       * A quarter turn that cannot be made is skipped rather than refused: the body
+       * carries on to the half turn, and to the three-quarter turn if that will not do
+       * either. Turning a shelf standing on the floor asks for exactly this — the first
+       * quarter would bury half of it, while the half turn is perfectly fine.
+       */
+      const order: (1 | 2 | 3)[] = turns === 1 ? [1, 2, 3] : [3, 2, 1];
+      let turned: ReturnType<typeof rotateBlock> = null;
+      for (const quarters of order) {
+        const candidate = rotateBlock(selected, axis, quarters, pivot);
+        if (fits(candidate)) {
+          turned = candidate;
+          break;
+        }
       }
 
-      for (const t of turned) {
-        const def = getPartDefinition(t.definitionId);
-        if (!def) continue;
-        const bounded = clampToWorkspace(rotateGridCells(def.gridCells, t.rotation), t.position, t.orientation);
-        if (bounded[0] !== t.position[0] || bounded[1] !== t.position[1] || bounded[2] !== t.position[2]) {
-          setToast("That turn would take the selection outside the buildable area");
-          setTimeout(() => setToast(null), 2500);
-          return;
-        }
+      if (!turned) {
+        setToast("No turn about that axis leaves the selection inside the buildable area");
+        setTimeout(() => setToast(null), 2500);
+        return;
       }
 
       const before = selected.map((p) => ({
@@ -792,15 +837,74 @@ export function App() {
         color: p.color,
       }));
 
+      /*
+       * A turn moves bar ends just as a drag does, so the connectors they leave and
+       * meet are recomputed the same way — grown for an end that arrives with nowhere
+       * to land, simplified for one whose arm falls idle. Connectors inside the
+       * selection are turning with the body and are left alone.
+       */
+      const adapted = (
+        assembly.adaptiveEnabled
+          ? turned
+              .filter((t) => getPartDefinition(t.definitionId)?.category === "support")
+              .flatMap((t) =>
+                adaptiveConnectorsFor(assembly, {
+                  instanceId: t.id,
+                  definitionId: t.definitionId,
+                  position: t.position,
+                  rotation: t.rotation,
+                  orientation: t.orientation,
+                }),
+              )
+              .filter((a) => !selectedPartIds.has(a.instanceId))
+          : []
+      )
+        .filter((a, i, all) => all.findIndex((b) => b.instanceId === a.instanceId) === i)
+        .flatMap((a) => {
+          const connector = assembly.getPartById(a.instanceId);
+          if (!connector) return [];
+          return [
+            {
+              before: {
+                definitionId: connector.definitionId,
+                position: [...connector.position] as GridPosition,
+                rotation: [...connector.rotation] as Rotation3,
+                orientation: connector.orientation,
+                color: connector.color,
+              },
+              after: {
+                definitionId: a.definitionId,
+                position: [...a.cell] as GridPosition,
+                rotation: a.rotation,
+                orientation: connector.orientation,
+                color: connector.color,
+              },
+            },
+          ];
+        });
+
       // The ids the turn issues, kept by the command itself rather than looked up
       // afterwards: two parts of one definition can share a cell, so definition and
       // position do not always name one part.
       let created: string[] = [];
 
       const cmd: Command = {
-        description: `Rotate ${before.length} part(s)`,
+        description:
+          adapted.length > 0
+            ? `Rotate ${before.length} part(s) and adapt ${adapted.length} connector(s)`
+            : `Rotate ${before.length} part(s)`,
         execute() {
           removeMatchingParts(before);
+          for (const swap of adapted) {
+            removeMatchingParts([swap.before]);
+            assembly.addPart(
+              swap.after.definitionId,
+              swap.after.position,
+              swap.after.rotation,
+              swap.after.orientation,
+              swap.after.color,
+            );
+          }
           created = [];
           for (const t of turned) {
             const id = assembly.addPart(t.definitionId, t.position, t.rotation, t.orientation, t.color);
@@ -810,6 +914,16 @@ export function App() {
         },
         undo() {
           removeMatchingParts(turned);
+          for (const swap of adapted) {
+            removeMatchingParts([swap.after]);
+            assembly.addPart(
+              swap.before.definitionId,
+              swap.before.position,
+              swap.before.rotation,
+              swap.before.orientation,
+              swap.before.color,
+            );
+          }
           const restored: string[] = [];
           for (const p of before) {
             const id = assembly.addPart(p.definitionId, p.position, p.rotation, p.orientation, p.color);
@@ -819,9 +933,10 @@ export function App() {
         },
       };
       history.execute(cmd);
+      if (pivot) heldPivotRef.current = { ids: [...created], cell: pivot };
       keepUnlocked(before.map((p, i) => [p.id, created[i]] as [string, string]).filter((pair) => !!pair[1]));
     },
-    [selectedPartIds, keepUnlocked, snapshot.gravityEnabled],
+    [selectedPartIds, keepUnlocked],
   );
 
   const handleOrientSelectedParts = useCallback(() => {
@@ -942,6 +1057,18 @@ export function App() {
     },
     [mode, selectedPartIds],
   );
+
+  /** What the rings draw — the same answer the turn itself will get */
+  const rotationPivot = useMemo<GridPosition | null>(
+    () =>
+      resolveRotationPivot(
+        snapshot.parts.filter((p) => selectedPartIds.has(p.instanceId)),
+        selectedPoint,
+        heldPivotRef.current,
+      ),
+    [selectedPartIds, selectedPoint, snapshot.parts],
+  );
+  selectedPointRef.current = selectedPoint;
 
   // A spot only means something while its part is the selection
   const activePoint = useMemo(() => {
@@ -1556,6 +1683,7 @@ export function App() {
           onMovePart={handleMovePart}
           onMoveSelectedParts={handleMoveSelectedParts}
           onClickPart={handleClickPart}
+          rotationPivot={rotationPivot}
           lockedPartIds={lockedPartIds}
           onLockedPartDrag={handleLockedPartDrag}
           selectedPoint={activePoint}
