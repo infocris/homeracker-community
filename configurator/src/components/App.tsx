@@ -665,6 +665,18 @@ export function App() {
       handlePlacePart(definitionId, position, rotation);
       setSelectedPoint(null);
       setPreviewSuggestion(null);
+      // Select what was just placed, so the junction views carry on showing it
+      // Reversed rather than findLast: the tsconfig lib predates it
+      const placed = [...assembly.getAllParts()]
+        .reverse()
+        .find(
+          (p) =>
+            p.definitionId === definitionId &&
+            p.position[0] === position[0] &&
+            p.position[1] === position[1] &&
+            p.position[2] === position[2],
+        );
+      if (placed) setSelectedPartIds(new Set([placed.instanceId]));
     },
     [handlePlacePart],
   );

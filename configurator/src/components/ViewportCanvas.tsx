@@ -2109,11 +2109,18 @@ function Scene({
 export function ViewportCanvas(props: ViewportProps) {
   const [computingCollisions, setComputingCollisions] = useState(false);
   const [collidingPartIds, setCollidingPartIds] = useState<Set<string>>(new Set());
-  // Three points of view on the picked position, offered while its suggestions are
-  const junctionCell = useMemo(
-    () => (props.selectedPoint ? targetCellOf(props.selectedPoint) : null),
-    [props.selectedPoint],
-  );
+  // Three points of view on a junction: the position being picked, or a selected
+  // connector — which is what a suggestion becomes once placed, so the views stay up
+  // across that step instead of blinking out at the moment of interest.
+  const junctionCell = useMemo(() => {
+    if (props.selectedPoint) return targetCellOf(props.selectedPoint);
+    if (props.selectedPartIds.size !== 1) return null;
+    const id = [...props.selectedPartIds][0];
+    const part = props.parts.find((p) => p.instanceId === id);
+    if (!part) return null;
+    const isConnector = getPartDefinition(part.definitionId)?.category === "connector";
+    return isConnector ? ([...part.position] as GridPosition) : null;
+  }, [props.selectedPoint, props.selectedPartIds, props.parts]);
 
   const [light, setLight] = useState<LightSettings>(loadLightSettings);
   const [lightPanelOpen, setLightPanelOpen] = useState(false);
