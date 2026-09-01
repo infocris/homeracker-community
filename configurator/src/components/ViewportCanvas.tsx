@@ -164,6 +164,7 @@ export function computeDrawSpan(
 }
 
 const CAMERA_MODE_STORAGE_KEY = "homeracker-camera-orthographic";
+const CONNECTORS_STORAGE_KEY = "homeracker-show-connectors";
 const MIRROR_STORAGE_KEY = "homeracker-mirror-minimap";
 
 /** Half-width the shadow camera and the shadow catcher have to span */
@@ -2128,6 +2129,8 @@ interface SceneProps extends ViewportProps {
   selectedResizable: { part: PlacedPart; origin: GridPosition; size: [number, number, number] } | null;
   /** Connectors ghosted out of the way of a selected support */
   fadedPartIds: Set<string>;
+  /** Off leaves only the bars, so the shape of a structure can be read on its own */
+  showConnectors: boolean;
   /** The connector this drop would change, previewed until the drag ends */
   adaptation: ConnectorAdaptation | null;
   onAdaptation: (adaptation: ConnectorAdaptation | null) => void;
@@ -2176,6 +2179,7 @@ function Scene({
   selectedResizable,
   selectionBody,
   fadedPartIds,
+  showConnectors,
   adaptation,
   onAdaptation,
   onRotateSelectedParts,
@@ -2414,6 +2418,7 @@ function Scene({
         if (previewSuggestion?.replaces === part.instanceId) return null;
         // The connector an adaptive drop would change steps aside for its own ghost
         if (adaptation?.instanceId === part.instanceId) return null;
+        if (!showConnectors && getPartDefinition(part.definitionId)?.category === "connector") return null;
         const preview = resizePreview && resizePreview.instanceId === part.instanceId ? resizePreview : null;
         const renderPart: PlacedPart = preview ? previewPart(part, preview) : part;
         return (
@@ -2553,6 +2558,22 @@ export function ViewportCanvas(props: ViewportProps) {
   useEffect(() => {
     saveLightSettings(light);
   }, [light]);
+
+  const [showConnectors, setShowConnectors] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(CONNECTORS_STORAGE_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(CONNECTORS_STORAGE_KEY, showConnectors ? "1" : "0");
+    } catch {
+      /* ignore quota errors */
+    }
+  }, [showConnectors]);
 
   const [mirrorMinimap, setMirrorMinimap] = useState<boolean>(() => {
     try {
@@ -3311,6 +3332,7 @@ export function ViewportCanvas(props: ViewportProps) {
           selectedResizable={selectedResizable}
           selectionBody={selectionBody}
           fadedPartIds={fadedPartIds}
+          showConnectors={showConnectors}
           adaptation={adaptation}
           onAdaptation={setAdaptation}
           onRotateSelectedParts={props.onRotateSelectedParts}
@@ -3345,6 +3367,14 @@ export function ViewportCanvas(props: ViewportProps) {
       {lightPanelOpen && (
         <ShadowSettings settings={light} onChange={setLight} onClose={() => setLightPanelOpen(false)} />
       )}
+      <button
+        className={`viewport-connectors-toggle${!showConnectors ? " viewport-mirror-toggle--on" : ""}`}
+        type="button"
+        onClick={() => setShowConnectors((v) => !v)}
+        title="Hide the connectors to read the run of the bars on their own"
+      >
+        Connectors: {showConnectors ? "On" : "Off"}
+      </button>
       <button
         className={`viewport-mirror-toggle${mirrorMinimap ? " viewport-mirror-toggle--on" : ""}`}
         type="button"

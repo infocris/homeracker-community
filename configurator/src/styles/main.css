@@ -555,6 +555,24 @@
   cursor: pointer;
 }
 
+.viewport-connectors-toggle {
+  position: absolute;
+  left: 400px;
+  bottom: 20px;
+  z-index: 6;
+  height: 34px;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--bg-primary);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  color: #f4f8ff;
+  cursor: pointer;
+}
+
 .viewport-mirror-toggle {
   position: absolute;
   left: 320px;
