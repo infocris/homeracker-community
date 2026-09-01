@@ -32,6 +32,7 @@ import {
   branchDirectionsAt,
   replacementSuggestionsAt,
   targetCellOf,
+  throughDirectionsAt,
   topologySuggestionsAt,
 } from "../assembly/compatibility";
 import {
@@ -132,6 +133,7 @@ assembly.subscribe(() => {
   nearestAttachmentPoint,
   compatiblePartsAt,
   branchDirectionsAt,
+  throughDirectionsAt,
   topologySuggestionsAt,
   replacementSuggestionsAt,
 };

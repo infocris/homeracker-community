@@ -120,9 +120,32 @@ function oppositeDirection(dir: Direction): Direction {
   return `${dir[0] === "+" ? "-" : "+"}${dir[1]}` as Direction;
 }
 
-/** World directions a connector arm would have to reach in, from this cell. */
-export function branchDirectionsAt(assembly: AssemblyState, cell: GridPosition): Direction[] {
+/**
+ * Directions in which a support already occupying this cell carries on: both ways
+ * from a cell in mid-span, inward only from the bar's own end cell.
+ *
+ * These count as branches of the junction even though nothing has to reach *out* to
+ * them — the bar is already there, threaded through where the connector will sit, and
+ * the arms that embrace it are doing work rather than going spare.
+ */
+export function throughDirectionsAt(assembly: AssemblyState, cell: GridPosition): Direction[] {
   const dirs = new Set<Direction>();
+  for (const part of assembly.getAllParts()) {
+    const def = getPartDefinition(part.definitionId);
+    if (def?.category !== "support") continue;
+    const cells = getWorldCells(rotateGridCells(def.gridCells, part.rotation), part.position, part.orientation ?? "y");
+    if (cells.length < 2) continue;
+    const index = cells.findIndex((c) => c[0] === cell[0] && c[1] === cell[1] && c[2] === cell[2]);
+    if (index === -1) continue;
+    if (index > 0) dirs.add(directionBetween(cells[index - 1], cell));
+    if (index < cells.length - 1) dirs.add(directionBetween(cells[index + 1], cell));
+  }
+  return [...dirs];
+}
+
+/** World directions a connector at this cell has to account for. */
+export function branchDirectionsAt(assembly: AssemblyState, cell: GridPosition): Direction[] {
+  const dirs = new Set<Direction>(throughDirectionsAt(assembly, cell));
   for (const part of assembly.getAllParts()) {
     if (getPartDefinition(part.definitionId)?.category !== "support") continue;
     for (const point of attachmentPointsOf(part)) {
@@ -268,6 +291,18 @@ export function compatiblePartsAt(assembly: AssemblyState, part: PlacedPart, poi
   if (point.fit === "through") {
     const axis = AXIS_OF[point.direction[1]];
     return def.category === "support" ? connectorsThrough(assembly, target, axis) : barsThrough(assembly, target, axis);
+  }
+
+  // A bar end butting into the middle of another bar: nothing snaps onto a cell that
+  // is already taken, so the sockets have nothing to say here. What belongs there is a
+  // connector threaded onto the bar in the way, with an arm reaching back along this one.
+  if (def.category === "support" && throughDirectionsAt(assembly, target).length > 0) {
+    const reachBack = oppositeDirection(point.direction);
+    return PART_CATALOG.filter(
+      (candidate) =>
+        candidate.category === "connector" &&
+        rotationFittingBranches(assembly, candidate, target, [reachBack]) !== null,
+    );
   }
 
   // A socket takes a bar; a bar end takes a connector
