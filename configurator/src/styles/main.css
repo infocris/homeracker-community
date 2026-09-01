@@ -562,22 +562,6 @@
 }
 
 .viewport-level-step,
-.viewport-level-panel {
-  position: absolute;
-  bottom: 42px;
-  left: 0;
-  min-width: 230px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
-}
-
-.viewport-level-panel .shadow-settings-row {
-  margin: 0;
-}
-
 .viewport-level-readout {
   border: 0;
   background: transparent;
@@ -610,6 +594,24 @@
   border-right: 1px solid var(--bg-primary);
   white-space: nowrap;
 }
+
+/* The opacity popover, hung above the group it belongs to */
+.viewport-level-panel {
+  position: absolute;
+  bottom: 42px;
+  left: 0;
+  min-width: 230px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.viewport-level-panel .shadow-settings-row {
+  margin: 0;
+}
+
 
 .viewport-workspace-toggle {
   height: 34px;
@@ -1248,14 +1250,16 @@
 
 .viewport-toolbelt {
   position: absolute;
-  left: 20px;
+  /* Clear of the axis gizmo the scene draws in this corner */
+  left: 120px;
   bottom: 20px;
   z-index: 6;
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
-  max-width: calc(100% - 40px);
+  /* Overflow stacks upward, away from the axis gizmo sitting under this corner */
+  flex-wrap: wrap-reverse;
+  max-width: calc(100% - 140px);
 }
 
 .part-inspector {
