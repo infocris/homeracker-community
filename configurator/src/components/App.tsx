@@ -147,6 +147,51 @@ assembly.subscribe(() => {
   settleWithGravity,
 };
 
+type PartSpec = {
+  definitionId: string;
+  position: GridPosition;
+  rotation?: Rotation3;
+  /** Given wherever it is known: two identical bars may share a cell across axes */
+  orientation?: Axis;
+};
+
+/**
+ * Removes one part per spec, matched on what the part is rather than on its id.
+ *
+ * Ids must not be captured when a command is built. Every move is a remove plus an
+ * add, so a part comes back with a fresh id, and an id noted at build time goes stale
+ * the moment any neighbouring command in the stack runs. That is what duplicated a
+ * part on a second undo: the first undo reissued the id the older command was waiting
+ * to remove, so nothing was removed and the old part was added alongside it.
+ */
+function removeMatchingParts(specs: PartSpec[]): void {
+  const claimed = new Set<string>();
+  for (const spec of specs) {
+    const match = assembly.getAllParts().find((p) => {
+      if (claimed.has(p.instanceId)) return false;
+      if (p.definitionId !== spec.definitionId) return false;
+      if (
+        p.position[0] !== spec.position[0] ||
+        p.position[1] !== spec.position[1] ||
+        p.position[2] !== spec.position[2]
+      )
+        return false;
+      if (
+        spec.rotation &&
+        (p.rotation[0] !== spec.rotation[0] || p.rotation[1] !== spec.rotation[1] || p.rotation[2] !== spec.rotation[2])
+      )
+        return false;
+      // The sparse collision rules let two identical bars cross on one cell, so the
+      // axis a support runs along is part of what names it
+      if (spec.orientation !== undefined && p.orientation !== spec.orientation) return false;
+      return true;
+    });
+    if (!match) continue;
+    claimed.add(match.instanceId);
+    assembly.removePart(match.instanceId);
+  }
+}
+
 /** The part standing at this definition and position — how a moved part's new id is found */
 function findPlacedPart(definitionId: string, position: GridPosition): PlacedPart | undefined {
   return assembly
@@ -324,7 +369,7 @@ export function App() {
     const cmd: Command = {
       description: `Delete ${partsToDelete.length} part(s)`,
       execute() {
-        for (const p of partsToDelete) assembly.removePart(p.instanceId);
+        removeMatchingParts(partsToDelete);
       },
       undo() {
         for (const p of partsToDelete) {
@@ -363,7 +408,9 @@ export function App() {
       const cmd: Command = {
         description: `Move ${definitionId}`,
         execute() {
-          assembly.removePart(instanceId);
+          removeMatchingParts([
+            { definitionId, position: oldPosition, rotation: oldRotation, orientation: oldOrientation },
+          ]);
           assembly.addPart(definitionId, newPosition, rotation, orientation, oldColor);
         },
         undo() {
@@ -436,7 +483,14 @@ export function App() {
         description: `Move ${partsToMove.length} part(s)`,
         execute() {
           // Remove all first, then re-add at new positions (avoids collision with each other)
-          for (const p of partsToMove) assembly.removePart(p.id);
+          removeMatchingParts(
+            partsToMove.map((p) => ({
+              definitionId: p.def,
+              position: p.oldPos,
+              rotation: p.oldRot,
+              orientation: p.oldOrient,
+            })),
+          );
           for (const p of partsToMove) assembly.addPart(p.def, p.newPos, p.newRot, p.newOrient, p.color);
         },
         undo() {
@@ -530,7 +584,9 @@ export function App() {
       const cmd: Command = {
         description,
         execute() {
-          for (const p of moving) assembly.removePart(p.id);
+          removeMatchingParts(
+            moving.map((p) => ({ definitionId: p.def, position: p.oldPos, rotation: p.rot, orientation: p.orient })),
+          );
           for (const p of moving) assembly.addPart(p.def, movedPositionOf(p), p.rot, p.orient, p.color);
         },
         undo() {
@@ -686,7 +742,7 @@ export function App() {
       const cmd: Command = {
         description: `Rotate ${before.length} part(s)`,
         execute() {
-          for (const p of before) assembly.removePart(p.id);
+          removeMatchingParts(before);
           created = [];
           for (const t of turned) {
             const id = assembly.addPart(t.definitionId, t.position, t.rotation, t.orientation, t.color);
@@ -695,7 +751,7 @@ export function App() {
           setSelectedPartIds(new Set(created));
         },
         undo() {
-          for (const id of created) assembly.removePart(id);
+          removeMatchingParts(turned);
           const restored: string[] = [];
           for (const p of before) {
             const id = assembly.addPart(p.definitionId, p.position, p.rotation, p.orientation, p.color);
@@ -740,7 +796,14 @@ export function App() {
     const cmd: Command = {
       description: `Orient ${partsToOrient.length} support(s)`,
       execute() {
-        for (const p of partsToOrient) assembly.removePart(p.id);
+        removeMatchingParts(
+          partsToOrient.map((p) => ({
+            definitionId: p.def,
+            position: p.pos,
+            rotation: p.rot,
+            orientation: p.oldOrient,
+          })),
+        );
         for (const p of partsToOrient) {
           assembly.addPart(p.def, p.pos, p.rot, nextOrientation(p.oldOrient), p.color);
         }
@@ -908,7 +971,14 @@ export function App() {
     const cmd: Command = {
       description: `Replace ${before.definitionId} with ${definitionId}`,
       execute() {
-        assembly.removePart(instanceId);
+        removeMatchingParts([
+          {
+            definitionId: before.definitionId,
+            position: before.position,
+            rotation: before.rotation,
+            orientation: before.orientation,
+          },
+        ]);
         const newId = assembly.addPart(definitionId, position, rotation, before.orientation, before.color);
         if (newId) setSelectedPartIds(new Set([newId]));
       },
@@ -1034,7 +1104,14 @@ export function App() {
     const cmd: Command = {
       description: `Resize ${newDefId}`,
       execute() {
-        assembly.removePart(instanceId);
+        removeMatchingParts([
+          {
+            definitionId: before.definitionId,
+            position: before.position,
+            rotation: before.rotation,
+            orientation: before.orientation,
+          },
+        ]);
         const newId = assembly.addPart(newDefId, position, IDENTITY_ROTATION, newOrientation, before.color);
         if (newId) setSelectedPartIds(new Set([newId]));
       },
