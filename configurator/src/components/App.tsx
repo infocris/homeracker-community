@@ -30,6 +30,7 @@ import {
   compatiblePartsAt,
   nearestAttachmentPoint,
   branchDirectionsAt,
+  replacementSuggestionsAt,
   targetCellOf,
   topologySuggestionsAt,
 } from "../assembly/compatibility";
@@ -40,7 +41,13 @@ import {
   findConnectorSnapPoints,
   computeAutoRotation,
 } from "../assembly/snap";
-import { computeGroundLift, nextOrientation, clampToWorkspace, rotateGridCells } from "../assembly/grid-utils";
+import {
+  computeGroundLift,
+  getWorldCells,
+  nextOrientation,
+  clampToWorkspace,
+  rotateGridCells,
+} from "../assembly/grid-utils";
 import { detectCollidingPartIds, detectCollidingPartIdsMesh } from "../assembly/collision";
 import {
   placementCollides,
@@ -126,6 +133,7 @@ assembly.subscribe(() => {
   compatiblePartsAt,
   branchDirectionsAt,
   topologySuggestionsAt,
+  replacementSuggestionsAt,
 };
 (window as any).__gravity = {
   placementCollides,
@@ -134,6 +142,19 @@ assembly.subscribe(() => {
   restOnCollision,
   settleWithGravity,
 };
+
+/** The part standing at this definition and position — how a moved part's new id is found */
+function findPlacedPart(definitionId: string, position: GridPosition): PlacedPart | undefined {
+  return assembly
+    .getAllParts()
+    .find(
+      (p) =>
+        p.definitionId === definitionId &&
+        p.position[0] === position[0] &&
+        p.position[1] === position[1] &&
+        p.position[2] === position[2],
+    );
+}
 
 export function App() {
   const [ready, setReady] = useState(false);
@@ -181,6 +202,77 @@ export function App() {
     (cb) => assembly.subscribe(cb),
     () => assembly.getSnapshot(),
   );
+
+  /**
+   * Connectors a deliberate act has released. They are held in place otherwise: a
+   * connector is the joint the parts around it were aimed at, so dragging one loose
+   * by accident undoes more than it looks like it does. The lock is implicit — no
+   * gesture applies it — and only an explicit unlock lifts it.
+   */
+  const [unlockedPartIds, setUnlockedPartIds] = useState<Set<string>>(new Set());
+
+  // The move handlers are deliberately dependency-free and outlive any one render,
+  // so they read the lock through a ref rather than closing over a stale set
+  const lockedPartIdsRef = useRef<Set<string>>(new Set());
+
+  const lockedPartIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const part of snapshot.parts) {
+      if (getPartDefinition(part.definitionId)?.category !== "connector") continue;
+      if (!unlockedPartIds.has(part.instanceId)) ids.add(part.instanceId);
+    }
+    return ids;
+  }, [snapshot.parts, unlockedPartIds]);
+
+  lockedPartIdsRef.current = lockedPartIds;
+
+  /** The selected connectors, and whether the lock is off on all of them */
+  const lockSelection = useMemo(() => {
+    const connectors = [...selectedPartIds].filter((id) => {
+      const part = assembly.getPartById(id);
+      return part ? getPartDefinition(part.definitionId)?.category === "connector" : false;
+    });
+    if (connectors.length === 0) return null;
+    return { ids: connectors, unlocked: connectors.every((id) => unlockedPartIds.has(id)) };
+  }, [selectedPartIds, unlockedPartIds, snapshot.parts]);
+
+  const handleToggleLock = useCallback(() => {
+    if (!lockSelection) return;
+    const { ids, unlocked } = lockSelection;
+    setUnlockedPartIds((prev) => {
+      const next = new Set(prev);
+      for (const id of ids) {
+        if (unlocked) next.delete(id);
+        else next.add(id);
+      }
+      return next;
+    });
+  }, [lockSelection]);
+
+  /**
+   * A move is a remove plus an add, so a part comes back with a new id. Carrying the
+   * release across keeps an unlocked connector unlocked until the lock is deliberately
+   * put back, instead of snapping shut the moment the part is touched.
+   */
+  const keepUnlocked = useCallback((pairs: Iterable<[string, string]>) => {
+    setUnlockedPartIds((prev) => {
+      if (prev.size === 0) return prev;
+      const next = new Set(prev);
+      let changed = false;
+      for (const [oldId, newId] of pairs) {
+        if (next.delete(oldId)) {
+          next.add(newId);
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, []);
+
+  const handleLockedPartDrag = useCallback(() => {
+    setToast("Connector locked — use Unlock in the toolbar to move it");
+    setTimeout(() => setToast(null), 2500);
+  }, []);
 
   const handleSelectPart = useCallback((definitionId: string) => {
     setMode({ type: "place", definitionId });
@@ -244,6 +336,8 @@ export function App() {
     (instanceId: string, newPosition: GridPosition, newRotation?: PlacedPart["rotation"], newOrientation?: Axis) => {
       const part = assembly.getPartById(instanceId);
       if (!part) return;
+      // The authority on the lock, whichever gesture asked for the move
+      if (lockedPartIdsRef.current.has(instanceId)) return;
 
       const rotation = newRotation ?? part.rotation;
       const orientation = newOrientation ?? part.orientation;
@@ -285,8 +379,10 @@ export function App() {
         },
       };
       history.execute(cmd);
+      const moved = findPlacedPart(definitionId, newPosition);
+      if (moved) keepUnlocked([[instanceId, moved.instanceId]]);
     },
-    [],
+    [keepUnlocked],
   );
 
   const handleMoveSelectedParts = useCallback(
@@ -356,15 +452,28 @@ export function App() {
         },
       };
       history.execute(cmd);
+      keepUnlocked(
+        partsToMove
+          .map((p) => [p.id, findPlacedPart(p.def, p.newPos)?.instanceId] as const)
+          .filter((pair): pair is [string, string] => !!pair[1]),
+      );
     },
-    [selectedPartIds],
+    [selectedPartIds, keepUnlocked],
   );
 
-  const handleNudgeParts = useCallback(
-    (dx: number, dy: number, dz: number) => {
-      if (selectedPartIds.size === 0) return;
+  /**
+   * Slides parts by a whole number of cells as one undoable step, and reports the
+   * ids they come back with — a move is a remove plus an add, so each part is
+   * reissued. Returns null when nothing moves: an offset of zero, no part left to
+   * move, or a step that would push something out of the buildable area, in which
+   * case the whole group stays put rather than deforming against the wall.
+   */
+  const shiftParts = useCallback(
+    (ids: Iterable<string>, delta: GridPosition, description: string): Map<string, string> | null => {
+      const [dx, dy, dz] = delta;
+      if (dx === 0 && dy === 0 && dz === 0) return null;
 
-      const partsToNudge: {
+      const moving: {
         id: string;
         def: string;
         oldPos: GridPosition;
@@ -372,10 +481,10 @@ export function App() {
         orient?: Axis;
         color?: string;
       }[] = [];
-      for (const id of selectedPartIds) {
+      for (const id of ids) {
         const part = assembly.getPartById(id);
         if (!part) continue;
-        partsToNudge.push({
+        moving.push({
           id,
           def: part.definitionId,
           oldPos: part.position,
@@ -384,65 +493,127 @@ export function App() {
           color: part.color,
         });
       }
-      if (partsToNudge.length === 0) return;
+      if (moving.length === 0) return null;
 
-      // The selection moves as a block: if the nudge would push any part out of the
-      // buildable area, the whole group stops at the wall rather than deforming.
-      for (const p of partsToNudge) {
+      const movedPositionOf = (p: (typeof moving)[number]): GridPosition => [
+        p.oldPos[0] + dx,
+        p.oldPos[1] + dy,
+        p.oldPos[2] + dz,
+      ];
+
+      for (const p of moving) {
         const def = getPartDefinition(p.def);
         if (!def) continue;
-        const next: GridPosition = [p.oldPos[0] + dx, p.oldPos[1] + dy, p.oldPos[2] + dz];
+        const next = movedPositionOf(p);
         const bounded = clampToWorkspace(rotateGridCells(def.gridCells, p.rot), next, p.orient);
-        if (bounded[0] !== next[0] || bounded[1] !== next[1] || bounded[2] !== next[2]) return;
+        if (bounded[0] !== next[0] || bounded[1] !== next[1] || bounded[2] !== next[2]) return null;
       }
 
+      /** The part now standing where one of the moved parts was put */
+      const findMoved = (p: (typeof moving)[number]) => {
+        const pos = movedPositionOf(p);
+        return assembly
+          .getAllParts()
+          .find(
+            (ap) =>
+              ap.definitionId === p.def &&
+              ap.position[0] === pos[0] &&
+              ap.position[1] === pos[1] &&
+              ap.position[2] === pos[2],
+          );
+      };
+
       const cmd: Command = {
-        description: `Nudge ${partsToNudge.length} part(s)`,
+        description,
         execute() {
-          for (const p of partsToNudge) assembly.removePart(p.id);
-          for (const p of partsToNudge) {
-            const newPos: GridPosition = [p.oldPos[0] + dx, p.oldPos[1] + dy, p.oldPos[2] + dz];
-            assembly.addPart(p.def, newPos, p.rot, p.orient, p.color);
-          }
+          for (const p of moving) assembly.removePart(p.id);
+          for (const p of moving) assembly.addPart(p.def, movedPositionOf(p), p.rot, p.orient, p.color);
         },
         undo() {
-          // Remove parts at nudged positions, re-add at original positions
-          const allParts = assembly.getAllParts();
-          for (const p of partsToNudge) {
-            const newPos: GridPosition = [p.oldPos[0] + dx, p.oldPos[1] + dy, p.oldPos[2] + dz];
-            const match = allParts.find(
-              (ap) =>
-                ap.definitionId === p.def &&
-                ap.position[0] === newPos[0] &&
-                ap.position[1] === newPos[1] &&
-                ap.position[2] === newPos[2],
-            );
+          for (const p of moving) {
+            const match = findMoved(p);
             if (match) assembly.removePart(match.instanceId);
           }
-          for (const p of partsToNudge) assembly.addPart(p.def, p.oldPos, p.rot, p.orient, p.color);
+          for (const p of moving) assembly.addPart(p.def, p.oldPos, p.rot, p.orient, p.color);
         },
       };
       history.execute(cmd);
-      // Re-select nudged parts (they get new IDs after remove+add)
-      const allParts = assembly.getAllParts();
-      const newIds = new Set<string>();
-      for (const p of partsToNudge) {
-        const newPos: GridPosition = [p.oldPos[0] + dx, p.oldPos[1] + dy, p.oldPos[2] + dz];
-        const match = allParts.find(
-          (ap) =>
-            ap.definitionId === p.def &&
-            ap.position[0] === newPos[0] &&
-            ap.position[1] === newPos[1] &&
-            ap.position[2] === newPos[2],
-        );
-        if (match) newIds.add(match.instanceId);
+
+      const remap = new Map<string, string>();
+      for (const p of moving) {
+        const match = findMoved(p);
+        if (match) remap.set(p.id, match.instanceId);
       }
-      setSelectedPartIds(newIds);
+      keepUnlocked(remap);
+      return remap;
     },
-    [selectedPartIds],
+    [keepUnlocked],
+  );
+
+  const handleNudgeParts = useCallback(
+    (dx: number, dy: number, dz: number) => {
+      const ids = [...selectedPartIds];
+      if (ids.length === 0) return;
+      // A locked connector on its own does not budge. Inside a wider selection it
+      // travels with the block, which keeps the joint where its parts expect it.
+      if (ids.length === 1 && lockedPartIdsRef.current.has(ids[0])) return;
+
+      const remap = shiftParts(ids, [dx, dy, dz], `Nudge ${ids.length} part(s)`);
+      if (!remap) return;
+      setSelectedPartIds(new Set(remap.values()));
+    },
+    [selectedPartIds, shiftParts],
   );
 
   const nextStep = (step: RotationStep): RotationStep => (step === 0 ? 90 : step === 90 ? 180 : step === 180 ? 270 : 0);
+
+  /** Slide the whole assembly so it stands in the middle of the buildable area. */
+  const handleCentreAssembly = useCallback(() => {
+    const parts = assembly.getAllParts();
+    if (parts.length === 0) return;
+
+    // Measured over occupied cells, not part origins, so a long bar counts its length
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    let minZ = Number.POSITIVE_INFINITY;
+    let maxZ = Number.NEGATIVE_INFINITY;
+    for (const part of parts) {
+      const def = getPartDefinition(part.definitionId);
+      if (!def) continue;
+      for (const cell of getWorldCells(
+        rotateGridCells(def.gridCells, part.rotation),
+        part.position,
+        part.orientation ?? "y",
+      )) {
+        minX = Math.min(minX, cell[0]);
+        maxX = Math.max(maxX, cell[0]);
+        minZ = Math.min(minZ, cell[2]);
+        maxZ = Math.max(maxZ, cell[2]);
+      }
+    }
+    if (!Number.isFinite(minX)) return;
+
+    // Only across the floor: the buildable area rests on the ground, and lifting the
+    // assembly to centre it in height would stand it on nothing.
+    const delta: GridPosition = [-Math.round((minX + maxX) / 2), 0, -Math.round((minZ + maxZ) / 2)];
+    if (delta[0] === 0 && delta[2] === 0) {
+      setToast("The assembly is already centred");
+      setTimeout(() => setToast(null), 2000);
+      return;
+    }
+
+    const remap = shiftParts(
+      parts.map((p) => p.instanceId),
+      delta,
+      "Centre the assembly",
+    );
+    if (!remap) {
+      setToast("Centring would push the assembly outside the buildable area");
+      setTimeout(() => setToast(null), 2500);
+      return;
+    }
+    setSelectedPartIds((prev) => new Set([...prev].map((id) => remap.get(id) ?? id)));
+  }, [shiftParts]);
 
   const handleRotateSelectedParts = useCallback(
     (axis: 0 | 1 | 2) => {
@@ -504,6 +675,7 @@ export function App() {
       // Re-select rotated parts (they get new IDs after remove+add)
       const allParts = assembly.getAllParts();
       const newIds = new Set<string>();
+      const released: [string, string][] = [];
       for (const p of partsToRotate) {
         const newRot: Rotation3 = [...p.oldRot];
         newRot[axis] = nextStep(newRot[axis]);
@@ -517,11 +689,15 @@ export function App() {
             ap.rotation[1] === newRot[1] &&
             ap.rotation[2] === newRot[2],
         );
-        if (match) newIds.add(match.instanceId);
+        if (match) {
+          newIds.add(match.instanceId);
+          released.push([p.id, match.instanceId]);
+        }
       }
       setSelectedPartIds(newIds);
+      keepUnlocked(released);
     },
-    [selectedPartIds],
+    [selectedPartIds, keepUnlocked],
   );
 
   const handleOrientSelectedParts = useCallback(() => {
@@ -578,6 +754,7 @@ export function App() {
     // Re-select oriented parts
     const allParts = assembly.getAllParts();
     const newIds = new Set<string>(selectedPartIds);
+    const released: [string, string][] = [];
     for (const p of partsToOrient) {
       newIds.delete(p.id);
       const match = allParts.find(
@@ -587,10 +764,14 @@ export function App() {
           ap.position[1] === p.pos[1] &&
           ap.position[2] === p.pos[2],
       );
-      if (match) newIds.add(match.instanceId);
+      if (match) {
+        newIds.add(match.instanceId);
+        released.push([p.id, match.instanceId]);
+      }
     }
     setSelectedPartIds(newIds);
-  }, [selectedPartIds]);
+    keepUnlocked(released);
+  }, [selectedPartIds, keepUnlocked]);
 
   /** Spot picked by re-clicking an already-selected part */
   const [selectedPoint, setSelectedPoint] = useState<AttachmentPoint | null>(null);
@@ -651,13 +832,15 @@ export function App() {
     definitionId: string;
     position: GridPosition;
     rotation: Rotation3;
+    /** Connector this one would stand in for, hidden while the ghost takes its place */
+    replaces?: string;
   } | null>(null);
 
   // The suggestion list unmounts when the picked spot changes, and an unmounting
   // element fires no pointerleave — so drop the ghost here rather than rely on it
   useEffect(() => {
     setPreviewSuggestion(null);
-  }, [activePoint]);
+  }, [activePoint, selectedPartIds]);
 
   /** Drop a suggestion straight onto the spot it was suggested for */
   const handlePlaceAtPoint = useCallback(
@@ -680,6 +863,69 @@ export function App() {
     },
     [handlePlacePart],
   );
+
+  /**
+   * Connectors that could take the place of the selected one. Offered on plain
+   * selection — before any spot on it is picked — since replacing the connector and
+   * attaching something to it are two different intents.
+   */
+  const replacement = useMemo(() => {
+    if (activePoint || selectedPartIds.size !== 1) return null;
+    const part = assembly.getPartById([...selectedPartIds][0]);
+    if (!part) return null;
+    const found = replacementSuggestionsAt(assembly, part);
+    if (found.suggestions.length === 0) return null;
+    return {
+      instanceId: part.instanceId,
+      definitionId: part.definitionId,
+      rotation: part.rotation,
+      cell: [...part.position] as GridPosition,
+      ...found,
+    };
+    // snapshot.parts is in the deps because the branches and the clearances depend
+    // on what is placed around the connector
+  }, [activePoint, selectedPartIds, snapshot.parts]);
+
+  /** Swap a placed connector for another one on the same cell. */
+  const handleReplaceConnector = useCallback((instanceId: string, definitionId: string, rotation: Rotation3) => {
+    const part = assembly.getPartById(instanceId);
+    if (!part) return;
+    const before: PlacedPart = { ...part, position: [...part.position], rotation: [...part.rotation] as Rotation3 };
+    const sameRotation = before.rotation.every((step, i) => step === rotation[i]);
+    if (before.definitionId === definitionId && sameRotation) return;
+
+    const position = before.position;
+    const cmd: Command = {
+      description: `Replace ${before.definitionId} with ${definitionId}`,
+      execute() {
+        assembly.removePart(instanceId);
+        const newId = assembly.addPart(definitionId, position, rotation, before.orientation, before.color);
+        if (newId) setSelectedPartIds(new Set([newId]));
+      },
+      undo() {
+        const current = assembly
+          .getAllParts()
+          .find(
+            (p) =>
+              p.definitionId === definitionId &&
+              p.position[0] === position[0] &&
+              p.position[1] === position[1] &&
+              p.position[2] === position[2],
+          );
+        if (current) assembly.removePart(current.instanceId);
+        const restored = assembly.addPart(
+          before.definitionId,
+          before.position,
+          before.rotation,
+          before.orientation,
+          before.color,
+        );
+        if (restored) setSelectedPartIds(new Set([restored]));
+      },
+    };
+    history.execute(cmd);
+    setPreviewSuggestion(null);
+  }, []);
 
   const compatibleDefinitionIds = useMemo(() => {
     if (!activePoint || !filterByPosition || selectedPartIds.size !== 1) return null;
@@ -1121,6 +1367,8 @@ export function App() {
         topology={topology}
         onPlaceAtPoint={handlePlaceAtPoint}
         onHoverSuggestion={setPreviewSuggestion}
+        replacement={replacement}
+        onReplaceConnector={handleReplaceConnector}
       />
       <div className="main-area">
         <Toolbar
@@ -1142,6 +1390,9 @@ export function App() {
           onToggleCollisions={handleToggleCollisions}
           fineMeshCollisions={snapshot.fineMeshCollisions}
           onToggleFineMesh={handleToggleFineMesh}
+          lockSelection={lockSelection ? { count: lockSelection.ids.length, unlocked: lockSelection.unlocked } : null}
+          onToggleLock={handleToggleLock}
+          onCentre={snapshot.parts.length > 0 ? handleCentreAssembly : undefined}
         />
         <ViewportCanvas
           parts={snapshot.parts}
@@ -1154,6 +1405,8 @@ export function App() {
           onMovePart={handleMovePart}
           onMoveSelectedParts={handleMoveSelectedParts}
           onClickPart={handleClickPart}
+          lockedPartIds={lockedPartIds}
+          onLockedPartDrag={handleLockedPartDrag}
           selectedPoint={activePoint}
           previewSuggestion={previewSuggestion}
           onClickEmpty={handleClickEmpty}

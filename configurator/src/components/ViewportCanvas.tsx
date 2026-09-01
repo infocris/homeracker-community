@@ -26,7 +26,7 @@ import type {
 import { getPartDefinition } from "../data/catalog";
 import { isCustomPart, getCustomPartGeometry } from "../data/custom-parts";
 import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
-import { AssemblyState } from "../assembly/AssemblyState";
+import { AssemblyState, gridKeysForCell } from "../assembly/AssemblyState";
 import {
   nextOrientation,
   orientationToRotation,
@@ -102,10 +102,13 @@ interface ViewportProps {
   onMovePart: (instanceId: string, newPosition: GridPosition, rotation?: Rotation3, orientation?: Axis) => void;
   onMoveSelectedParts: (primaryId: string, newPosition: GridPosition, rotation?: Rotation3, orientation?: Axis) => void;
   onClickPart: (instanceId: string, shiftKey: boolean, gridPoint?: GridPosition) => void;
+  /** Parts held in place — selectable and clickable, but not draggable */
+  lockedPartIds: Set<string>;
+  onLockedPartDrag: () => void;
   /** Attachment point picked by re-clicking the selected part, highlighted in the scene */
   selectedPoint: AttachmentPoint | null;
   /** Suggestion under the cursor in the sidebar, previewed in place */
-  previewSuggestion: { definitionId: string; position: GridPosition; rotation: Rotation3 } | null;
+  previewSuggestion: { definitionId: string; position: GridPosition; rotation: Rotation3; replaces?: string } | null;
   onClickEmpty: () => void;
   onDeleteSelected: () => void;
   onPasteParts: (clipboard: ClipboardData, targetPosition: GridPosition, extraRotation?: Rotation3) => void;
@@ -165,9 +168,11 @@ const JUNCTION_SIZE = 0.2;
 
 /** The three points of view offered on a picked position, and how they are aimed. */
 const JUNCTION_VIEWS: { key: string; label: string; direction: [number, number, number] }[] = [
-  { key: "front", label: "Front", direction: [0, 0.4, 1] },
-  { key: "side", label: "Side", direction: [1, 0.4, 0] },
+  { key: "back", label: "Back", direction: [0, 0.4, -1] },
   { key: "top", label: "Top", direction: [0.001, 1, 0.001] },
+  // Straight up from under the floor. Nothing hides it: the floor plane is
+  // single-sided and faces up, so it is culled when looked at from below.
+  { key: "bottom", label: "Bottom", direction: [0.001, -1, 0.001] },
 ];
 
 /** Distance the junction cameras sit from the cell, in world units */
@@ -222,6 +227,18 @@ function junctionRect(index: number): InsetRect {
   };
 }
 
+/** How much of a part is left showing when it stands in the way of the junction. */
+const FADED_OPACITY = 0.2;
+
+/** Walks up to the part a mesh belongs to, or null for the grid, ghosts and markers. */
+function ownerPartOf(object: THREE.Object3D): string | null {
+  for (let node: THREE.Object3D | null = object; node; node = node.parent) {
+    const id = node.userData?.partInstanceId;
+    if (typeof id === "string") return id;
+  }
+  return null;
+}
+
 /**
  * Extra views drawn over the main one: the mirror minimap, and three points of view
  * zoomed on a picked position while its suggestions are offered.
@@ -231,10 +248,60 @@ function junctionRect(index: number): InsetRect {
  * fight over the insets. Each inset is confined by a scissor, which also keeps
  * `render`'s own clear from wiping what came before.
  */
-function ViewportInsets({ mirror, junction }: { mirror: boolean; junction: GridPosition | null }) {
+function ViewportInsets({
+  mirror,
+  junction,
+  junctionParts,
+}: {
+  mirror: boolean;
+  junction: GridPosition | null;
+  /** Parts standing on the junction cell — the ones the close-ups are about */
+  junctionParts: Set<string>;
+}) {
   const { gl, scene, camera, size, controls } = useThree();
   const insetCamera = useMemo(() => new THREE.PerspectiveCamera(50, 1, 1, 10000), []);
   const target = useMemo(() => new THREE.Vector3(), []);
+
+  /*
+   * The close-ups look at a cell buried inside the assembly, so whatever is in the
+   * way is turned translucent for those passes only — swapped in after the main view
+   * is drawn and swapped back before the frame ends.
+   *
+   * The clones are kept per source material rather than mutating it: a material is
+   * shared between every part that uses it, and the selected connector is often one
+   * of them. Swapping `mesh.material` is per mesh, so it cannot leak sideways.
+   */
+  const fadedMaterials = useMemo(() => new WeakMap<THREE.Material, THREE.Material>(), []);
+  const swapped = useMemo<{ mesh: THREE.Mesh; material: THREE.Material | THREE.Material[] }[]>(() => [], []);
+
+  const fadedVersionOf = (material: THREE.Material): THREE.Material => {
+    let faded = fadedMaterials.get(material);
+    if (!faded) {
+      faded = material.clone();
+      faded.transparent = true;
+      faded.opacity = FADED_OPACITY;
+      // Out of the depth buffer, so the junction shows through whatever is nearer
+      faded.depthWrite = false;
+      fadedMaterials.set(material, faded);
+    }
+    return faded;
+  };
+
+  const fadeSurroundings = () => {
+    scene.traverse((object) => {
+      const mesh = object as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.material) return;
+      const owner = ownerPartOf(mesh);
+      if (!owner || junctionParts.has(owner)) return;
+      swapped.push({ mesh, material: mesh.material });
+      mesh.material = Array.isArray(mesh.material) ? mesh.material.map(fadedVersionOf) : fadedVersionOf(mesh.material);
+    });
+  };
+
+  const restoreSurroundings = () => {
+    for (const entry of swapped) entry.mesh.material = entry.material;
+    swapped.length = 0;
+  };
 
   useFrame(() => {
     const ratio = gl.getPixelRatio();
@@ -276,6 +343,7 @@ function ViewportInsets({ mirror, junction }: { mirror: boolean; junction: GridP
 
     if (junction) {
       const centre = gridToWorld(junction);
+      fadeSurroundings();
       JUNCTION_VIEWS.forEach((view, index) => {
         drawInset(junctionRect(index), (cam) => {
           const [dx, dy, dz] = view.direction;
@@ -289,6 +357,7 @@ function ViewportInsets({ mirror, junction }: { mirror: boolean; junction: GridP
           cam.lookAt(centre[0], centre[1], centre[2]);
         });
       });
+      restoreSurroundings();
     }
 
     gl.setScissorTest(false);
@@ -2014,11 +2083,16 @@ function Scene({
 
       {/* Placed parts */}
       {parts.map((part) => {
+        // A replacement ghost stands on this very cell, so the connector it would
+        // replace steps aside for it — otherwise the two are drawn into each other
+        if (previewSuggestion?.replaces === part.instanceId) return null;
         const preview = resizePreview && resizePreview.instanceId === part.instanceId ? resizePreview : null;
         const renderPart: PlacedPart = preview ? previewPart(part, preview) : part;
         return (
           <group
             key={part.instanceId}
+            // Lets the close-up views tell a part's meshes from the rest of the scene
+            userData={{ partInstanceId: part.instanceId }}
             onPointerOver={(e) => {
               e.stopPropagation();
               onHoverPart(part.instanceId);
@@ -2056,7 +2130,11 @@ function Scene({
 
       {mode.type === "draw" &&
         (drawPreview ? (
-          <DrawSpanGhost position={drawPreview.position} size={drawPreview.size} />
+          <>
+            <DrawSpanGhost position={drawPreview.position} size={drawPreview.size} />
+            {/* The length while it is still being dragged out, not only once placed */}
+            <DimensionLabel min={drawPreview.position} size={drawPreview.size} />
+          </>
         ) : (
           <DrawSpanCursor assembly={assembly} gravityEnabled={gravityEnabled} />
         ))}
@@ -2121,6 +2199,19 @@ export function ViewportCanvas(props: ViewportProps) {
     const isConnector = getPartDefinition(part.definitionId)?.category === "connector";
     return isConnector ? ([...part.position] as GridPosition) : null;
   }, [props.selectedPoint, props.selectedPartIds, props.parts]);
+
+  // Whatever stands on the junction cell stays solid in the close-ups; everything
+  // else fades, since from those angles the assembly is mostly in the way. An empty
+  // cell leaves the set empty, which is what a hovered suggestion wants: the ghost
+  // is the only thing there is to look at.
+  const junctionParts = useMemo(() => {
+    const ids = new Set<string>();
+    if (!junctionCell) return ids;
+    for (const key of gridKeysForCell(junctionCell)) {
+      for (const id of props.assembly.gridOccupancy.get(key) ?? []) ids.add(id);
+    }
+    return ids;
+  }, [junctionCell, props.assembly, props.parts]);
 
   const [light, setLight] = useState<LightSettings>(loadLightSettings);
   const [lightPanelOpen, setLightPanelOpen] = useState(false);
@@ -2196,6 +2287,8 @@ export function ViewportCanvas(props: ViewportProps) {
     gridPoint?: GridPosition;
     /** Pressed with the right button: this drag moves the part in height */
     vertical?: boolean;
+    /** The part is locked and the refusal has already been reported */
+    refused?: boolean;
   } | null>(null);
 
   const [drawDrag, setDrawDrag] = useState<{ start: GridPosition; current: GridPosition } | null>(null);
@@ -2447,6 +2540,16 @@ export function ViewportCanvas(props: ViewportProps) {
       const dx = e.clientX - pending.startX;
       const dy = e.clientY - pending.startY;
       if (Math.sqrt(dx * dx + dy * dy) >= DRAG_THRESHOLD) {
+        // A locked part keeps its press: the pending entry stays so the release still
+        // reads as a click and selects, it just never becomes a drag. Said once, or
+        // every further move over the threshold would say it again.
+        if (props.lockedPartIds.has(pending.instanceId)) {
+          if (!pending.refused) {
+            pending.refused = true;
+            props.onLockedPartDrag();
+          }
+          return;
+        }
         const part = props.assembly.getPartById(pending.instanceId);
         if (part) {
           // Preserve current Y elevation: yLift = currentY - autoGroundLift
@@ -2533,7 +2636,19 @@ export function ViewportCanvas(props: ViewportProps) {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
     };
-  }, [dragState, boxSelectRect, props.parts, props.assembly, props.onMovePart, props.onClickPart, props.onBoxSelect]);
+    // The lock has to be in here: the handlers below live in the listener's closure,
+    // so a set that changed after the last subscription would go unnoticed
+  }, [
+    dragState,
+    boxSelectRect,
+    props.parts,
+    props.assembly,
+    props.lockedPartIds,
+    props.onLockedPartDrag,
+    props.onMovePart,
+    props.onClickPart,
+    props.onBoxSelect,
+  ]);
 
   // Handle keyboard shortcuts
   useEffect(() => {
@@ -2787,7 +2902,9 @@ export function ViewportCanvas(props: ViewportProps) {
           onResizePreview={setResizePreview}
           selectedResizable={selectedResizable}
         />
-        {(mirrorMinimap || junctionCell) && <ViewportInsets mirror={mirrorMinimap} junction={junctionCell} />}
+        {(mirrorMinimap || junctionCell) && (
+          <ViewportInsets mirror={mirrorMinimap} junction={junctionCell} junctionParts={junctionParts} />
+        )}
       </Canvas>
       {mirrorMinimap &&
         (() => {

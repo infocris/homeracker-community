@@ -36,7 +36,19 @@ interface SidebarProps {
   /** Branches meeting at the picked spot, and the connectors whose arms match them */
   topology: { cell: GridPosition; branches: Direction[]; suggestions: TopologySuggestion[] } | null;
   onPlaceAtPoint: (definitionId: string, position: GridPosition, rotation: Rotation3) => void;
-  onHoverSuggestion: (preview: { definitionId: string; position: GridPosition; rotation: Rotation3 } | null) => void;
+  onHoverSuggestion: (
+    preview: { definitionId: string; position: GridPosition; rotation: Rotation3; replaces?: string } | null,
+  ) => void;
+  /** The selected connector and the connectors that could stand in for it */
+  replacement: {
+    instanceId: string;
+    definitionId: string;
+    rotation: Rotation3;
+    cell: GridPosition;
+    branches: Direction[];
+    suggestions: TopologySuggestion[];
+  } | null;
+  onReplaceConnector: (instanceId: string, definitionId: string, rotation: Rotation3) => void;
 }
 
 const SECTIONS: {
@@ -128,6 +140,8 @@ export function Sidebar({
   topology,
   onPlaceAtPoint,
   onHoverSuggestion,
+  replacement,
+  onReplaceConnector,
 }: SidebarProps) {
   const activePlaceId = activeMode.type === "place" ? activeMode.definitionId : null;
 
@@ -277,6 +291,46 @@ export function Sidebar({
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {replacement && (
+        <div className="catalog-section sidebar-topology">
+          <h2 className="catalog-section-title">
+            Replace this connector
+            <span className="catalog-section-count">
+              {replacement.branches.length} {replacement.branches.length === 1 ? "branch" : "branches"}
+            </span>
+          </h2>
+          <div className="catalog-grid" onPointerLeave={() => onHoverSuggestion(null)}>
+            {replacement.suggestions.map(({ def, rotation }) => {
+              const isCurrent =
+                def.id === replacement.definitionId && rotation.every((step, i) => step === replacement.rotation[i]);
+              return (
+                <div
+                  key={def.id}
+                  onPointerEnter={() =>
+                    onHoverSuggestion(
+                      isCurrent
+                        ? null
+                        : {
+                            definitionId: def.id,
+                            position: replacement.cell,
+                            rotation,
+                            replaces: replacement.instanceId,
+                          },
+                    )
+                  }
+                >
+                  <PartButton
+                    part={def}
+                    isActive={isCurrent}
+                    onSelect={() => onReplaceConnector(replacement.instanceId, def.id, rotation)}
+                  />
+                </div>
+              );
+            })}
+          </div>
         </div>
       )}
 

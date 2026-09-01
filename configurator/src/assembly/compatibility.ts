@@ -144,6 +144,37 @@ function armDirections(def: PartDefinition, rotation: Rotation3): Set<Direction>
 export type TopologySuggestion = { def: PartDefinition; rotation: Rotation3 };
 
 /**
+ * A rotation that aims every one of `branches` at an arm of `def` and leaves the
+ * connector clear of what is already placed, or null when no rotation does.
+ *
+ * `preferred` is tried first, so a connector that is already aimed the right way
+ * keeps its aim instead of being handed an equivalent rotation of the same shape.
+ */
+function rotationFittingBranches(
+  assembly: AssemblyState,
+  def: PartDefinition,
+  cell: GridPosition,
+  branches: Direction[],
+  ignoreIds?: Set<string>,
+  preferred?: Rotation3,
+): Rotation3 | null {
+  const candidates: Rotation3[] = preferred ? [preferred] : [];
+  for (const x of STEPS) {
+    for (const y of STEPS) {
+      for (const z of STEPS) candidates.push([x, y, z]);
+    }
+  }
+
+  for (const rotation of candidates) {
+    const arms = armDirections(def, rotation);
+    if (!branches.every((d) => arms.has(d))) continue;
+    if (placementCollides(assembly, def.id, cell, rotation, undefined, ignoreIds)) continue;
+    return rotation;
+  }
+  return null;
+}
+
+/**
  * Connectors whose arm layout matches the branches meeting at this cell: three
  * branches ask for a 3-way, not a 2-way that cannot reach them nor a 4-way with a
  * spare arm. Each suggestion carries the rotation that lines its arms up.
@@ -159,21 +190,40 @@ export function topologySuggestionsAt(
   for (const def of PART_CATALOG) {
     // Exact arm count — a connector with spare arms is not "the" fit for this spot
     if (def.category !== "connector" || def.connectionPoints.length !== branches.length) continue;
-    for (const x of STEPS) {
-      for (const y of STEPS) {
-        for (const z of STEPS) {
-          const rotation: Rotation3 = [x, y, z];
-          const arms = armDirections(def, rotation);
-          if (!branches.every((d) => arms.has(d))) continue;
-          if (placementCollides(assembly, def.id, cell, rotation)) continue;
-          suggestions.push({ def, rotation });
-          break;
-        }
-        if (suggestions.at(-1)?.def === def) break;
-      }
-      if (suggestions.at(-1)?.def === def) break;
-    }
+    const rotation = rotationFittingBranches(assembly, def, cell, branches);
+    if (rotation) suggestions.push({ def, rotation });
   }
+  return { branches, suggestions };
+}
+
+/**
+ * Connectors that could stand in for a placed one, so it can be swapped without
+ * moving anything else.
+ *
+ * Unlike the suggestions for an empty spot, spare arms are welcome here: trading a
+ * 2-way for a 3-way is exactly how a junction grows a branch. The closest fits come
+ * first, and the connector being replaced counts as absent — it is the one leaving.
+ */
+export function replacementSuggestionsAt(
+  assembly: AssemblyState,
+  part: PlacedPart,
+): { branches: Direction[]; suggestions: TopologySuggestion[] } {
+  const current = getPartDefinition(part.definitionId);
+  if (!current || current.category !== "connector") return { branches: [], suggestions: [] };
+
+  const cell: GridPosition = [...part.position];
+  const branches = branchDirectionsAt(assembly, cell);
+  const ignoreIds = new Set([part.instanceId]);
+
+  const suggestions: TopologySuggestion[] = [];
+  for (const def of PART_CATALOG) {
+    if (def.category !== "connector" || def.connectionPoints.length < branches.length) continue;
+    const preferred = def.id === part.definitionId ? part.rotation : undefined;
+    const rotation = rotationFittingBranches(assembly, def, cell, branches, ignoreIds, preferred);
+    if (rotation) suggestions.push({ def, rotation });
+  }
+  // Fewest spare arms first: the tightest fit is the likeliest swap
+  suggestions.sort((a, b) => a.def.connectionPoints.length - b.def.connectionPoints.length);
   return { branches, suggestions };
 }
 

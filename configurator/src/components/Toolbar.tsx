@@ -19,6 +19,11 @@ interface ToolbarProps {
   onToggleCollisions: () => void;
   fineMeshCollisions: boolean;
   onToggleFineMesh: () => void;
+  /** Connectors in the selection, and whether they are already released */
+  lockSelection: { count: number; unlocked: boolean } | null;
+  onToggleLock: () => void;
+  /** Absent while there is nothing placed to centre */
+  onCentre?: () => void;
 }
 
 export function Toolbar({
@@ -40,6 +45,9 @@ export function Toolbar({
   onToggleCollisions,
   fineMeshCollisions,
   onToggleFineMesh,
+  lockSelection,
+  onToggleLock,
+  onCentre,
 }: ToolbarProps) {
   return (
     <div className="toolbar">
@@ -56,6 +64,29 @@ export function Toolbar({
         {onDelete && (
           <button className="toolbar-btn toolbar-btn-danger" onClick={onDelete} title="Delete selected (Del)">
             Delete{selectedCount > 1 ? ` (${selectedCount})` : ""}
+          </button>
+        )}
+        {lockSelection && (
+          <button
+            className={`toolbar-btn${lockSelection.unlocked ? " toolbar-btn-active" : ""}`}
+            onClick={onToggleLock}
+            title={
+              lockSelection.unlocked
+                ? "Hold the selected connector in place again"
+                : "Release the selected connector so it can be dragged"
+            }
+          >
+            {lockSelection.unlocked ? "Unlocked" : "Locked"}
+            {lockSelection.count > 1 ? ` (${lockSelection.count})` : ""}
+          </button>
+        )}
+        {onCentre && (
+          <button
+            className="toolbar-btn"
+            onClick={onCentre}
+            title="Slide the assembly to the middle of the buildable area"
+          >
+            Center
           </button>
         )}
         <button className="toolbar-btn toolbar-btn-danger" onClick={onClear} title="Clear all parts">
