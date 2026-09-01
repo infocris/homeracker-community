@@ -1170,20 +1170,36 @@
   color: var(--text-secondary);
 }
 
-/* Shortcut letter riding on each rotation ring, coloured to match it */
+/* The quarter-turn button riding on each rotation ring, coloured to match it. The
+   ring itself is inert, so this is the whole target — hence the size. */
 .rotation-key {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 34px;
+  height: 34px;
+  padding: 0;
   border-radius: 50%;
   background: rgba(22, 33, 62, 0.92);
-  border: 1px solid currentColor;
-  font-size: 11px;
+  border: 2px solid currentColor;
+  font-family: inherit;
+  font-size: 16px;
   font-weight: 700;
   line-height: 1;
+  cursor: pointer;
   user-select: none;
+  transition:
+    transform 90ms ease-out,
+    background 90ms ease-out;
+}
+
+.rotation-key:hover {
+  background: rgba(38, 56, 102, 0.96);
+  transform: scale(1.12);
+}
+
+.rotation-key:active {
+  transform: scale(0.94);
 }
 
 .dimension-label {

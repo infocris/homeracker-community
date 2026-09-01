@@ -563,6 +563,24 @@ const KEY_BADGE_AT: [number, number, number][] = [
 ];
 
 /**
+ * The same three directions as lattice vectors, so the app's own rotateGridCells can
+ * turn them exactly — which is how the on-screen direction of a turn is worked out
+ * without a second, possibly disagreeing, notion of which way a quarter turn goes.
+ */
+const KEY_BADGE_LATTICE: GridPosition[] = [
+  [0, 1, 1],
+  [1, 0, 1],
+  [1, 1, 0],
+];
+
+/** The elementary quarter turn about each axis, in the app's convention. */
+const AXIS_QUARTER_TURN: Rotation3[] = [
+  [90, 0, 0],
+  [0, 90, 0],
+  [0, 0, 90],
+];
+
+/**
  * Quarter-turn handles for a set of parts: one ring per axis, drawn around the middle
  * of what is selected.
  *
@@ -580,6 +598,7 @@ function RotationHandles({
   onRotate: (axis: 0 | 1 | 2, turns: 1 | 3) => void;
 }) {
   const [hovered, setHovered] = useState<number | null>(null);
+  const camera = useThree((state) => state.camera);
   // Perpendicular to the axis it turns about: the ring lies in the plane of the turn
   const lie: [number, number, number][] = [
     [0, Math.PI / 2, 0],
@@ -587,25 +606,36 @@ function RotationHandles({
     [0, 0, 0],
   ];
 
+  /**
+   * Which way round the ring a single quarter turn carries this button, as seen from
+   * where the camera stands: negative means it sweeps left across the screen.
+   *
+   * Read from the button's own position rather than the ring as a whole, because a
+   * circle in perspective moves left at one end and right at the other — "left" only
+   * means something at the point being clicked.
+   */
+  const screenSweep = (axis: 0 | 1 | 2): number => {
+    const probe = KEY_BADGE_LATTICE[axis];
+    const turned = rotateGridCells([probe], AXIS_QUARTER_TURN[axis])[0];
+    const scale = radius / Math.hypot(probe[0], probe[1], probe[2]);
+    const at = (v: GridPosition) =>
+      new THREE.Vector3(centre[0] + v[0] * scale, centre[1] + v[1] * scale, centre[2] + v[2] * scale).project(camera);
+    return at(turned).x - at(probe).x;
+  };
+
+  /** The turn whose sweep goes the way the pressed button asks for. */
+  const turnsForButton = (axis: 0 | 1 | 2, button: number): 1 | 3 => {
+    const forwardGoesLeft = screenSweep(axis) < 0;
+    const wantLeft = button !== 2;
+    return forwardGoesLeft === wantLeft ? 1 : 3;
+  };
+
   return (
     <group position={centre}>
+      {/* Rings are drawing, not controls: they show which plane each turn happens in
+          and take no clicks, so nothing they pass in front of becomes unreachable. */}
       {[0, 1, 2].map((axis) => (
-        <mesh
-          key={axis}
-          rotation={lie[axis]}
-          onPointerOver={(e) => {
-            e.stopPropagation();
-            setHovered(axis);
-          }}
-          onPointerOut={(e) => {
-            e.stopPropagation();
-            setHovered(null);
-          }}
-          onClick={(e) => {
-            e.stopPropagation();
-            onRotate(axis as 0 | 1 | 2, e.nativeEvent.shiftKey ? 3 : 1);
-          }}
-        >
+        <mesh key={axis} rotation={lie[axis]} raycast={() => {}}>
           <torusGeometry args={[radius, BASE_UNIT * (hovered === axis ? 0.11 : 0.06), 8, 48]} />
           <meshBasicMaterial
             color={AXIS_RING_COLOR[axis]}
@@ -615,22 +645,51 @@ function RotationHandles({
           />
         </mesh>
       ))}
-      {/* The shortcut for each ring, riding on the ring itself. One per octant
-          direction so the three never land on each other. */}
+
+      {/* The button for each plane, riding on its own ring. One per octant direction so
+          the three never land on each other. */}
       {[0, 1, 2].map((axis) => (
         <Html
           key={axis}
           position={KEY_BADGE_AT[axis].map((u) => u * radius) as [number, number, number]}
           center
-          zIndexRange={[14, 10]}
+          zIndexRange={[16, 10]}
           style={{ pointerEvents: "none" }}
         >
-          <span
+          <button
+            type="button"
             className="rotation-key"
-            style={{ color: AXIS_RING_COLOR[axis], opacity: hovered === null || hovered === axis ? 1 : 0.45 }}
+            style={{
+              color: AXIS_RING_COLOR[axis],
+              opacity: hovered === null || hovered === axis ? 1 : 0.5,
+              pointerEvents: "auto",
+            }}
+            title={`Quarter turn about ${AXIS_RING_AXIS[axis]} (${AXIS_RING_LABEL[axis]}) — left sweeps one way, right the other`}
+            /*
+             * R3F listens on the canvas container, which is an ancestor of this
+             * overlay, so an unstopped event would also be raycast into the scene and
+             * pick whatever stands behind the button. The right button needs its own
+             * care besides: unstopped it would reach the viewport, where a right press
+             * means cancel, and bring up the browser menu on top of that.
+             */
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+            }}
+            onPointerUp={(e) => {
+              e.stopPropagation();
+              // Both buttons act here — onClick would only ever see the left one
+              onRotate(axis as 0 | 1 | 2, turnsForButton(axis as 0 | 1 | 2, e.button));
+            }}
+            onContextMenu={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+            }}
+            onPointerEnter={() => setHovered(axis)}
+            onPointerLeave={() => setHovered(null)}
           >
             {AXIS_RING_LABEL[axis]}
-          </span>
+          </button>
         </Html>
       ))}
 

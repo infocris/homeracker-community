@@ -102,10 +102,44 @@ export function rotateBlock(
     }
   }
 
-  const pivot = min.map((lo, i) => Math.round((lo + max[i]) / 2)) as GridPosition;
+  /*
+   * The body turns about the cell nearest its centre, and is then put back so that
+   * cell is nearest its centre again. That second step is what makes the operation
+   * stable: rounding the pivot alone moved it, and because the extent changes with
+   * every turn it moved somewhere different each time — four quarter turns left the
+   * body two cells from where it started. Re-anchoring keeps "the rounded centre sits
+   * at the pivot" true before and after, so the next turn finds the same pivot, and
+   * four of them compose to nothing.
+   *
+   * No halves anywhere: the pivot is a cell, so the offsets are whole numbers and the
+   * turn is a plain integer rotation.
+   */
+  const roundedCentre = (lo: GridPosition, hi: GridPosition): GridPosition =>
+    [0, 1, 2].map((i) => Math.round((lo[i] + hi[i]) / 2)) as GridPosition;
+
+  const pivot = roundedCentre(min, max);
   const turnAbout = (cell: GridPosition): GridPosition => {
     const offset = turnCells([[cell[0] - pivot[0], cell[1] - pivot[1], cell[2] - pivot[2]]], axis, turns)[0];
     return [pivot[0] + offset[0], pivot[1] + offset[1], pivot[2] + offset[2]];
+  };
+
+  // Where the body lands before it is re-anchored
+  const landedMin: GridPosition = [Infinity, Infinity, Infinity];
+  const landedMax: GridPosition = [-Infinity, -Infinity, -Infinity];
+  for (const cells of occupied.values()) {
+    for (const cell of cells) {
+      const t = turnAbout(cell);
+      for (let i = 0; i < 3; i++) {
+        if (t[i] < landedMin[i]) landedMin[i] = t[i];
+        if (t[i] > landedMax[i]) landedMax[i] = t[i];
+      }
+    }
+  }
+  const landedPivot = roundedCentre(landedMin, landedMax);
+  const anchor: GridPosition = [pivot[0] - landedPivot[0], pivot[1] - landedPivot[1], pivot[2] - landedPivot[2]];
+  const turnAboutSnapped = (cell: GridPosition): GridPosition => {
+    const t = turnAbout(cell);
+    return [t[0] + anchor[0], t[1] + anchor[1], t[2] + anchor[2]];
   };
 
   const out: TurnedPart[] = [];
@@ -117,7 +151,7 @@ export function rotateBlock(
     const composed = composeBodyTurn(part.rotation, axis, turns);
     if (!composed) return null;
 
-    const wanted = cells.map(turnAbout);
+    const wanted = cells.map(turnAboutSnapped);
     const wantedKey = keyOf([...wanted].sort());
     const wantedMin = wanted.reduce(
       (acc, c) => [Math.min(acc[0], c[0]), Math.min(acc[1], c[1]), Math.min(acc[2], c[2])] as GridPosition,
