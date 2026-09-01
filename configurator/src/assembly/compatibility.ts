@@ -115,6 +115,68 @@ export function nearestAttachmentPoint(part: PlacedPart, gridPoint: GridPosition
   return best;
 }
 
+/** Flip a direction to its opposite. */
+function oppositeDirection(dir: Direction): Direction {
+  return `${dir[0] === "+" ? "-" : "+"}${dir[1]}` as Direction;
+}
+
+/** World directions a connector arm would have to reach in, from this cell. */
+export function branchDirectionsAt(assembly: AssemblyState, cell: GridPosition): Direction[] {
+  const dirs = new Set<Direction>();
+  for (const part of assembly.getAllParts()) {
+    if (getPartDefinition(part.definitionId)?.category !== "support") continue;
+    for (const point of attachmentPointsOf(part)) {
+      if (point.fit !== "adjacent") continue;
+      const target = getAdjacentPosition(point.cell, point.direction);
+      if (target[0] !== cell[0] || target[1] !== cell[1] || target[2] !== cell[2]) continue;
+      // The bar end points at this cell, so the bar lies the other way round
+      dirs.add(oppositeDirection(point.direction));
+    }
+  }
+  return [...dirs];
+}
+
+/** Where a connector's arms end up once rotated. */
+function armDirections(def: PartDefinition, rotation: Rotation3): Set<Direction> {
+  return new Set(def.connectionPoints.map((cp) => rotateDirection(cp.direction, rotation)));
+}
+
+export type TopologySuggestion = { def: PartDefinition; rotation: Rotation3 };
+
+/**
+ * Connectors whose arm layout matches the branches meeting at this cell: three
+ * branches ask for a 3-way, not a 2-way that cannot reach them nor a 4-way with a
+ * spare arm. Each suggestion carries the rotation that lines its arms up.
+ */
+export function topologySuggestionsAt(
+  assembly: AssemblyState,
+  cell: GridPosition,
+): { branches: Direction[]; suggestions: TopologySuggestion[] } {
+  const branches = branchDirectionsAt(assembly, cell);
+  if (branches.length === 0 || cell[1] < 0) return { branches, suggestions: [] };
+
+  const suggestions: TopologySuggestion[] = [];
+  for (const def of PART_CATALOG) {
+    // Exact arm count — a connector with spare arms is not "the" fit for this spot
+    if (def.category !== "connector" || def.connectionPoints.length !== branches.length) continue;
+    for (const x of STEPS) {
+      for (const y of STEPS) {
+        for (const z of STEPS) {
+          const rotation: Rotation3 = [x, y, z];
+          const arms = armDirections(def, rotation);
+          if (!branches.every((d) => arms.has(d))) continue;
+          if (placementCollides(assembly, def.id, cell, rotation)) continue;
+          suggestions.push({ def, rotation });
+          break;
+        }
+        if (suggestions.at(-1)?.def === def) break;
+      }
+      if (suggestions.at(-1)?.def === def) break;
+    }
+  }
+  return { branches, suggestions };
+}
+
 /** Bars that can be threaded through a cell along `axis` without an illegal overlap. */
 function barsThrough(assembly: AssemblyState, cell: GridPosition, axis: Axis): PartDefinition[] {
   const index = axis === "x" ? 0 : axis === "y" ? 1 : 2;

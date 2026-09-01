@@ -39,10 +39,23 @@ import { findBestSnap, findBestConnectorSnap, type GridRay } from "../assembly/s
 import { detectCollidingPartIds, detectCollidingPartIdsMesh } from "../assembly/collision";
 import { registerPartGeometry, hasRegisteredGeometry } from "../assembly/geometry-registry";
 import { ResizeHandles, type ResizePreview } from "./ResizeHandles";
-import { resizeEnvelopeOf, bestPartForSize, clampToSupportLength, MAX_SUPPORT_LENGTH } from "../assembly/part-sizing";
+import {
+  resizeEnvelopeOf,
+  bestPartForSize,
+  clampToSupportLength,
+  placedPartBounds,
+  MAX_SUPPORT_LENGTH,
+} from "../assembly/part-sizing";
 import { resolveDraw } from "../assembly/draw";
+import {
+  ShadowSettings,
+  type LightSettings,
+  lightPosition,
+  loadLightSettings,
+  saveLightSettings,
+} from "./ShadowSettings";
 import { type AttachmentPoint, targetCellOf } from "../assembly/compatibility";
-import { settleWithGravity, placementIsGrounded } from "../assembly/gravity";
+import { settleWithGravity, restOnCollision, placementIsGrounded } from "../assembly/gravity";
 
 /** Pointer travel (px) above which a press counts as a drag rather than a click */
 const DRAG_THRESHOLD = 5;
@@ -88,6 +101,8 @@ interface ViewportProps {
   onClickPart: (instanceId: string, shiftKey: boolean, gridPoint?: GridPosition) => void;
   /** Attachment point picked by re-clicking the selected part, highlighted in the scene */
   selectedPoint: AttachmentPoint | null;
+  /** Suggestion under the cursor in the sidebar, previewed in place */
+  previewSuggestion: { definitionId: string; position: GridPosition; rotation: Rotation3 } | null;
   onClickEmpty: () => void;
   onDeleteSelected: () => void;
   onPasteParts: (clipboard: ClipboardData, targetPosition: GridPosition, extraRotation?: Rotation3) => void;
@@ -133,21 +148,66 @@ export function computeDrawSpan(
 const CAMERA_MODE_STORAGE_KEY = "homeracker-camera-orthographic";
 const MIRROR_STORAGE_KEY = "homeracker-mirror-minimap";
 
-/** Fraction of the viewport the mirror inset takes up, and its margin in CSS px */
-const MINIMAP_SCALE = 0.26;
-const MINIMAP_MARGIN = 16;
+/** Half-width the shadow camera and the shadow catcher have to span */
+const SHADOW_EXTENT = WORKSPACE_EXTENT * BASE_UNIT + BASE_UNIT;
 
 /**
- * Inset showing the scene from the camera's mirror image through the ground plane —
- * the underside of the assembly.
- *
- * Taking a render priority means R3F hands rendering over entirely, so the main
- * view has to be drawn here too. The inset is confined with a scissor, which also
- * keeps `render`'s own clear from wiping the main image.
+ * Inset geometry, in fractions of the viewport. Fractions rather than pixels so the
+ * scissored render and the CSS frames are driven by the very same numbers — a pixel
+ * margin would have to be duplicated in the stylesheet and could drift out of step.
  */
-function MirrorMinimap() {
+const INSET_MARGIN = 0.02;
+const MIRROR_SIZE = 0.26;
+const JUNCTION_SIZE = 0.2;
+
+/** The three points of view offered on a picked position, and how they are aimed. */
+const JUNCTION_VIEWS: { key: string; label: string; direction: [number, number, number] }[] = [
+  { key: "front", label: "Front", direction: [0, 0.4, 1] },
+  { key: "side", label: "Side", direction: [1, 0.4, 0] },
+  { key: "top", label: "Top", direction: [0.001, 1, 0.001] },
+];
+
+/** Distance the junction cameras sit from the cell, in world units */
+const JUNCTION_DISTANCE = 8 * BASE_UNIT;
+
+type InsetRect = { x: number; y: number; w: number; h: number };
+
+/** The same fractions the scissor uses, as CSS so the frame lands on the render. */
+function insetStyle(rect: InsetRect): React.CSSProperties {
+  return {
+    left: `${rect.x * 100}%`,
+    top: `${rect.y * 100}%`,
+    width: `${rect.w * 100}%`,
+    height: `${rect.h * 100}%`,
+  };
+}
+
+/** Where each inset sits, measured from the top-left in viewport fractions. */
+function mirrorRect(): InsetRect {
+  return { x: 1 - MIRROR_SIZE - INSET_MARGIN, y: 1 - MIRROR_SIZE - INSET_MARGIN, w: MIRROR_SIZE, h: MIRROR_SIZE };
+}
+
+function junctionRect(index: number): InsetRect {
+  return {
+    x: 1 - JUNCTION_SIZE - INSET_MARGIN,
+    y: INSET_MARGIN + index * (JUNCTION_SIZE + INSET_MARGIN),
+    w: JUNCTION_SIZE,
+    h: JUNCTION_SIZE,
+  };
+}
+
+/**
+ * Extra views drawn over the main one: the mirror minimap, and three points of view
+ * zoomed on a picked position while its suggestions are offered.
+ *
+ * They share one component because taking a render priority hands rendering over
+ * entirely — two components each doing that would draw the main view twice and
+ * fight over the insets. Each inset is confined by a scissor, which also keeps
+ * `render`'s own clear from wiping what came before.
+ */
+function ViewportInsets({ mirror, junction }: { mirror: boolean; junction: GridPosition | null }) {
   const { gl, scene, camera, size, controls } = useThree();
-  const mirrorCamera = useMemo(() => new THREE.PerspectiveCamera(50, 1, 1, 10000), []);
+  const insetCamera = useMemo(() => new THREE.PerspectiveCamera(50, 1, 1, 10000), []);
   const target = useMemo(() => new THREE.Vector3(), []);
 
   useFrame(() => {
@@ -155,33 +215,55 @@ function MirrorMinimap() {
     const width = Math.max(1, Math.round(size.width * ratio));
     const height = Math.max(1, Math.round(size.height * ratio));
 
-    // Main view
     gl.setScissorTest(false);
     gl.setViewport(0, 0, width, height);
     gl.render(scene, camera);
 
-    const orbit = controls as { target?: THREE.Vector3 } | null;
-    target.copy(orbit?.target ?? new THREE.Vector3());
+    const drawInset = (rect: InsetRect, place: (cam: THREE.PerspectiveCamera) => void) => {
+      const w = Math.max(1, Math.round(rect.w * width));
+      const h = Math.max(1, Math.round(rect.h * height));
+      const x = Math.round(rect.x * width);
+      // GL counts from the bottom, the rects from the top
+      const y = Math.round((1 - rect.y - rect.h) * height);
 
-    // Reflect both the eye and what it looks at; world up is kept so the inset
-    // reads the right way round rather than upside down like a true mirror
-    mirrorCamera.position.set(camera.position.x, -camera.position.y, camera.position.z);
-    mirrorCamera.up.set(0, 1, 0);
-    mirrorCamera.lookAt(target.x, -target.y, target.z);
+      insetCamera.aspect = w / h;
+      place(insetCamera);
+      insetCamera.updateProjectionMatrix();
 
-    const insetWidth = Math.max(1, Math.round(width * MINIMAP_SCALE));
-    const insetHeight = Math.max(1, Math.round(height * MINIMAP_SCALE));
-    mirrorCamera.aspect = insetWidth / insetHeight;
-    mirrorCamera.updateProjectionMatrix();
+      gl.setScissorTest(true);
+      gl.setViewport(x, y, w, h);
+      gl.setScissor(x, y, w, h);
+      gl.render(scene, insetCamera);
+    };
 
-    const margin = Math.round(MINIMAP_MARGIN * ratio);
-    const x = width - insetWidth - margin;
-    const y = margin;
+    if (mirror) {
+      const orbit = controls as { target?: THREE.Vector3 } | null;
+      target.copy(orbit?.target ?? new THREE.Vector3());
+      drawInset(mirrorRect(), (cam) => {
+        // Reflect both the eye and what it looks at; world up is kept so the inset
+        // reads the right way round rather than upside down like a true mirror
+        cam.position.set(camera.position.x, -camera.position.y, camera.position.z);
+        cam.up.set(0, 1, 0);
+        cam.lookAt(target.x, -target.y, target.z);
+      });
+    }
 
-    gl.setScissorTest(true);
-    gl.setViewport(x, y, insetWidth, insetHeight);
-    gl.setScissor(x, y, insetWidth, insetHeight);
-    gl.render(scene, mirrorCamera);
+    if (junction) {
+      const centre = gridToWorld(junction);
+      JUNCTION_VIEWS.forEach((view, index) => {
+        drawInset(junctionRect(index), (cam) => {
+          const [dx, dy, dz] = view.direction;
+          const length = Math.hypot(dx, dy, dz);
+          cam.position.set(
+            centre[0] + (dx / length) * JUNCTION_DISTANCE,
+            centre[1] + (dy / length) * JUNCTION_DISTANCE,
+            centre[2] + (dz / length) * JUNCTION_DISTANCE,
+          );
+          cam.up.set(0, 1, 0);
+          cam.lookAt(centre[0], centre[1], centre[2]);
+        });
+      });
+    }
 
     gl.setScissorTest(false);
     gl.setViewport(0, 0, width, height);
@@ -329,6 +411,28 @@ function PartMesh({
   );
 }
 
+/**
+ * Ghost of a hovered suggestion, standing at the spot it was suggested for with the
+ * rotation that lines its arms up — so hovering the list shows the result in place.
+ */
+function SuggestionPreview({
+  definitionId,
+  position,
+  rotation,
+}: {
+  definitionId: string;
+  position: GridPosition;
+  rotation: Rotation3;
+}) {
+  return (
+    <group position={gridToWorld(position)}>
+      <Suspense fallback={<GhostFallback definitionId={definitionId} isSnapped />}>
+        <GhostModel definitionId={definitionId} rotation={rotation} isSnapped />
+      </Suspense>
+    </group>
+  );
+}
+
 /** Marks the spot a re-click picked on the selected part, and where a part would go */
 function AttachmentMarker({ point }: { point: AttachmentPoint }) {
   const worldPos = gridToWorld(targetCellOf(point));
@@ -379,6 +483,51 @@ function DrawSpanGhost({ position, size }: { position: GridPosition; size: [numb
 function previewDefinitionId(part: PlacedPart, size: [number, number, number]): string {
   const match = bestPartForSize(clampToSupportLength(size), getPartDefinition(part.definitionId)?.category);
   return match ? match.id : part.definitionId;
+}
+
+/**
+ * Guides for a part standing off the ground: its footprint below it, posts down to
+ * that footprint, and one tick per grid level so the height can be read by counting
+ * rather than guessed from perspective.
+ */
+function HeightGuides({ min, size }: { min: GridPosition; size: [number, number, number] }) {
+  const positions = useMemo(() => {
+    const u = BASE_UNIT;
+    const x0 = min[0] * u - u / 2;
+    const x1 = (min[0] + size[0]) * u - u / 2;
+    const z0 = min[2] * u - u / 2;
+    const z1 = (min[2] + size[2]) * u - u / 2;
+    const bottom = min[1] * u;
+    const ground = 0.05; // clear of the grid lines
+    const pts: number[] = [];
+    const seg = (ax: number, ay: number, az: number, bx: number, by: number, bz: number) =>
+      pts.push(ax, ay, az, bx, by, bz);
+
+    seg(x0, ground, z0, x1, ground, z0);
+    seg(x1, ground, z0, x1, ground, z1);
+    seg(x1, ground, z1, x0, ground, z1);
+    seg(x0, ground, z1, x0, ground, z0);
+
+    seg(x0, ground, z0, x0, bottom, z0);
+    seg(x1, ground, z0, x1, bottom, z0);
+    seg(x1, ground, z1, x1, bottom, z1);
+    seg(x0, ground, z1, x0, bottom, z1);
+
+    for (let level = 1; level <= min[1]; level++) {
+      const y = level * u;
+      seg(x0, y, z0, x0 - u * 0.4, y, z0);
+    }
+    return new Float32Array(pts);
+  }, [min[0], min[1], min[2], size[0], size[1], size[2]]);
+
+  return (
+    <lineSegments>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" args={[positions, 3]} />
+      </bufferGeometry>
+      <lineBasicMaterial color={PART_COLORS.selected} transparent opacity={0.7} depthWrite={false} />
+    </lineSegments>
+  );
 }
 
 /** Outline of the buildable area, so its edge is visible rather than a mystery wall */
@@ -525,7 +674,17 @@ function PartMeshLoaded({
 }) {
   const def = getPartDefinition(part.definitionId)!;
   const { scene } = useGLTF(def.modelPath);
-  const cloned = useMemo(() => scene.clone(), [scene]);
+  // Placed parts cast and receive; ghosts deliberately do neither
+  const cloned = useMemo(() => {
+    const copy = scene.clone();
+    copy.traverse((child) => {
+      if ((child as THREE.Mesh).isMesh) {
+        child.castShadow = true;
+        child.receiveShadow = true;
+      }
+    });
+    return copy;
+  }, [scene]);
   const worldPos = gridToWorld(part.position);
   const groupRef = useRef<THREE.Group>(null);
 
@@ -916,6 +1075,10 @@ function useGhostSnap({
    *  it overlaps, then falls onto the first thing below it (the ground otherwise).
    *  The ids in the set count as absent — they are the parts being moved. */
   gravityIgnoreIds,
+  /** Live drag state for the right button: while `active`, the cursor sets height
+   *  instead of footprint. `used` survives the release, so a height chosen on
+   *  purpose is not immediately undone by gravity pulling the part back down. */
+  verticalDragRef,
   /** Optional ref written synchronously inside useFrame so click handlers
    *  always read the latest computed state without waiting for a React render. */
   syncRef,
@@ -931,6 +1094,7 @@ function useGhostSnap({
   initialPosition?: GridPosition;
   grabOffsetRef?: React.MutableRefObject<[number, number] | null>;
   gravityIgnoreIds?: Set<string>;
+  verticalDragRef?: React.MutableRefObject<{ active: boolean; used: boolean; y: number }>;
   syncRef?: React.MutableRefObject<{
     position: GridPosition;
     orientation: Axis;
@@ -1038,16 +1202,47 @@ function useGhostSnap({
     const lift = def ? computeGroundLift(def, ghostRotation, orient) : 0;
     cursorGrid[1] = lift + yLift;
 
+    // Right button held: the footprint freezes and the cursor drives height instead,
+    // read off a vertical plane through the part turned to face the camera.
+    const vertical = verticalDragRef?.current;
+    if (vertical?.active) {
+      const held = syncRef?.current.position ?? gridPos;
+      const anchor = new THREE.Vector3(...gridToWorld(held));
+      const normal = new THREE.Vector3();
+      camera.getWorldDirection(normal);
+      normal.y = 0;
+      if (normal.lengthSq() > 1e-6) {
+        normal.normalize();
+        const uprightPlane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal, anchor);
+        const hit = new THREE.Vector3();
+        if (raycaster.ray.intersectPlane(uprightPlane, hit)) {
+          cursorGrid[0] = held[0];
+          cursorGrid[2] = held[2];
+          cursorGrid[1] = Math.max(lift, Math.round((hit.y - BASE_UNIT / 2) / BASE_UNIT));
+          vertical.y = cursorGrid[1];
+        }
+      }
+    } else if (vertical?.used) {
+      // The right button is usually released before the left. Keeping the chosen
+      // height here is what stops that release from undoing it, while leaving
+      // horizontal movement live so the part can still be positioned.
+      cursorGrid[1] = Math.max(lift, vertical.y);
+    }
+
     // Keep the part in the buildable area instead of letting it follow the cursor
     // off across the grid
     const boundedPos = def
       ? clampToWorkspace(rotateGridCells(def.gridCells, ghostRotation), cursorGrid, orient)
       : cursorGrid;
 
-    // Gravity: climb out of anything in the way, then fall onto whatever is below
+    // Gravity: climb out of anything in the way, then fall onto whatever is below.
+    // A height set by hand only gets the climb, or the fall would cancel it.
+    const heightChosen = !!verticalDragRef?.current.used;
     const freePos =
       gravityIgnoreIds && def
-        ? settleWithGravity(assembly, definitionId, boundedPos, ghostRotation, orient, lift, gravityIgnoreIds)
+        ? heightChosen
+          ? restOnCollision(assembly, definitionId, boundedPos, ghostRotation, orient, gravityIgnoreIds)
+          : settleWithGravity(assembly, definitionId, boundedPos, ghostRotation, orient, lift, gravityIgnoreIds)
         : boundedPos;
 
     setEffectiveOrientation(orient);
@@ -1142,6 +1337,7 @@ function DragPreview({
   yLift,
   snapEnabled,
   gravityEnabled,
+  verticalDragRef,
   selectedPartIds,
   parts,
 }: {
@@ -1155,6 +1351,7 @@ function DragPreview({
   yLift: number;
   snapEnabled: boolean;
   gravityEnabled: boolean;
+  verticalDragRef: React.MutableRefObject<{ active: boolean; used: boolean; y: number }>;
   selectedPartIds: Set<string>;
   parts: PlacedPart[];
 }) {
@@ -1180,6 +1377,7 @@ function DragPreview({
     initialPosition: dragState.originalPosition,
     grabOffsetRef,
     gravityIgnoreIds,
+    verticalDragRef,
   });
 
   // Keep dropTargetRef in sync
@@ -1195,6 +1393,15 @@ function DragPreview({
 
   const worldPos = gridToWorld(gridPos);
 
+  // The height is set during the drag, so the guides belong on the ghost too
+  const ghostBounds = placedPartBounds({
+    instanceId: dragState.instanceId,
+    definitionId: dragState.definitionId,
+    position: gridPos,
+    rotation: dragState.rotation,
+    orientation: effectiveOrientation,
+  });
+
   // Compute delta for multi-drag ghost rendering
   const isMultiDrag = selectedPartIds.size > 1 && selectedPartIds.has(dragState.instanceId);
   const delta: GridPosition = [
@@ -1205,6 +1412,7 @@ function DragPreview({
 
   return (
     <group>
+      {ghostBounds && ghostBounds.min[1] > 0 && <HeightGuides min={ghostBounds.min} size={ghostBounds.size} />}
       <group name="drag-preview" position={worldPos}>
         <Suspense fallback={<GhostFallback definitionId={dragState.definitionId} orientation={effectiveOrientation} />}>
           <GhostModel
@@ -1470,6 +1678,9 @@ interface SceneProps extends ViewportProps {
     rotation?: Rotation3;
   }>;
   onPartPointerDown: (instanceId: string, nativeEvent: PointerEvent, hit?: THREE.Vector3) => void;
+  verticalDragRef: React.MutableRefObject<{ active: boolean; used: boolean; y: number }>;
+  pressOriginRef: React.MutableRefObject<{ x: number; y: number } | null>;
+  light: LightSettings;
   yLift: number;
   boxSelectActive: boolean;
   collidingPartIds: Set<string>;
@@ -1499,12 +1710,16 @@ function Scene({
   dragState,
   dropTargetRef,
   onPartPointerDown,
+  verticalDragRef,
+  pressOriginRef,
+  light,
   yLift,
   flashPartId,
   flashDefinitionId,
   snapEnabled,
   gravityEnabled,
   selectedPoint,
+  previewSuggestion,
   boxSelectActive,
   collidingPartIds,
   drawDrag,
@@ -1528,6 +1743,14 @@ function Scene({
   const handleGroundClick = useCallback(
     (e: any) => {
       if (dragState) return;
+      // The browser reports the end of a camera orbit as a click too. Taking that for
+      // a click on the scene would place a part, or drop the picked position, every
+      // time the view is moved.
+      const origin = pressOriginRef.current;
+      const native = e.nativeEvent as PointerEvent | undefined;
+      if (origin && native && Math.hypot(native.clientX - origin.x, native.clientY - origin.y) >= DRAG_THRESHOLD) {
+        return;
+      }
       if (mode.type === "draw") return; // handled by pointer up
       if (mode.type === "place") {
         e.stopPropagation();
@@ -1541,7 +1764,17 @@ function Scene({
         onClickEmpty();
       }
     },
-    [mode, onPlacePart, onPasteParts, onClickEmpty, ghostStateRef, pasteStateRef, dragState, ghostRotation],
+    [
+      mode,
+      onPlacePart,
+      onPasteParts,
+      onClickEmpty,
+      ghostStateRef,
+      pasteStateRef,
+      dragState,
+      ghostRotation,
+      pressOriginRef,
+    ],
   );
 
   const handleGroundPointerDown = useCallback(
@@ -1576,6 +1809,19 @@ function Scene({
   // onDrawPointerUp is handled by window listeners in ViewportCanvas
   void onDrawPointerUp;
 
+  // Guides for any selected part that is off the ground
+  const heightGuides = useMemo(() => {
+    const out: { id: string; min: GridPosition; size: [number, number, number] }[] = [];
+    for (const part of parts) {
+      if (!selectedPartIds.has(part.instanceId)) continue;
+      if (dragState?.instanceId === part.instanceId) continue; // the ghost carries its own
+      const bounds = placedPartBounds(part);
+      if (!bounds || bounds.min[1] <= 0) continue;
+      out.push({ id: part.instanceId, min: bounds.min, size: bounds.size });
+    }
+    return out;
+  }, [parts, selectedPartIds, dragState]);
+
   const sceneDrawAxis: DrawAxis = mode.type === "draw" ? mode.axis : "horizontal";
   const drawSpan = drawDrag ? computeDrawSpan(drawDrag.start, drawDrag.current, sceneDrawAxis) : null;
   // Preview the settled placement, not the raw span — same resolver as the commit
@@ -1588,10 +1834,49 @@ function Scene({
       <ExposeScene />
       <FitCamera parts={parts} />
       {/* Lighting */}
-      <ambientLight intensity={3.5} />
-      <directionalLight position={[100, 200, 100]} intensity={1.8} castShadow />
+      <ambientLight intensity={light.ambient} />
+      {/* Same direction as before, pushed out so the orthographic shadow camera has
+          room to span the workspace instead of the default few units */}
+      <directionalLight
+        position={lightPosition(light)}
+        intensity={light.intensity}
+        castShadow={light.shadows}
+        shadow-mapSize={[light.resolution, light.resolution]}
+        shadow-camera-left={-SHADOW_EXTENT}
+        shadow-camera-right={SHADOW_EXTENT}
+        shadow-camera-top={SHADOW_EXTENT}
+        shadow-camera-bottom={-SHADOW_EXTENT}
+        shadow-camera-near={1}
+        shadow-camera-far={2000}
+        shadow-bias={-0.0006}
+        shadow-normalBias={0.08}
+      />
       <directionalLight position={[-50, 100, -50]} intensity={1.0} />
       <directionalLight position={[0, -100, 50]} intensity={0.8} />
+
+      {/* Solid floor that catches the shadows. Single-sided with its face up, so it
+          reads as opaque from above yet lets the mirror minimap see the underside
+          from below. Sits under the grid lines, and out of raycasting — it shares
+          the ground with the pick plane. */}
+      {light.floor && (
+        <mesh
+          rotation={[-Math.PI / 2, 0, 0]}
+          position={[0, -1.5, 0]}
+          receiveShadow
+          raycast={() => null}
+          renderOrder={-2}
+        >
+          <planeGeometry args={[SHADOW_EXTENT * 2, SHADOW_EXTENT * 2]} />
+          {/*
+            depthWrite off is what stops the grid flickering. Two near-coplanar planes
+            spanning to the horizon cannot be separated by the depth buffer at grazing
+            angles, whatever the gap; leaving the floor out of the buffer entirely
+            removes the contest instead of trying to win it. renderOrder puts it first,
+            so the grid and the parts still draw over it.
+          */}
+          <meshStandardMaterial color="#343450" depthWrite={false} />
+        </mesh>
+      )}
 
       {/* Camera controls — disabled during drag, box select, draw, or handle resize */}
       <OrbitControls
@@ -1616,7 +1901,18 @@ function Scene({
         infiniteGrid
       />
 
+      {heightGuides.map((g) => (
+        <HeightGuides key={g.id} min={g.min} size={g.size} />
+      ))}
+
       {selectedPoint && <AttachmentMarker point={selectedPoint} />}
+      {previewSuggestion && (
+        <SuggestionPreview
+          definitionId={previewSuggestion.definitionId}
+          position={previewSuggestion.position}
+          rotation={previewSuggestion.rotation}
+        />
+      )}
 
       <WorkspaceBounds />
 
@@ -1703,6 +1999,7 @@ function Scene({
           yLift={yLift}
           snapEnabled={snapEnabled}
           gravityEnabled={gravityEnabled}
+          verticalDragRef={verticalDragRef}
           selectedPartIds={selectedPartIds}
           parts={parts}
         />
@@ -1726,6 +2023,19 @@ function Scene({
 export function ViewportCanvas(props: ViewportProps) {
   const [computingCollisions, setComputingCollisions] = useState(false);
   const [collidingPartIds, setCollidingPartIds] = useState<Set<string>>(new Set());
+  // Three points of view on the picked position, offered while its suggestions are
+  const junctionCell = useMemo(
+    () => (props.selectedPoint ? targetCellOf(props.selectedPoint) : null),
+    [props.selectedPoint],
+  );
+
+  const [light, setLight] = useState<LightSettings>(loadLightSettings);
+  const [lightPanelOpen, setLightPanelOpen] = useState(false);
+
+  useEffect(() => {
+    saveLightSettings(light);
+  }, [light]);
+
   const [mirrorMinimap, setMirrorMinimap] = useState<boolean>(() => {
     try {
       return localStorage.getItem(MIRROR_STORAGE_KEY) === "1";
@@ -1777,11 +2087,19 @@ export function ViewportCanvas(props: ViewportProps) {
   }>({
     position: [0, 0, 0],
   });
+  /** Right button during a part drag: height instead of footprint */
+  const verticalDragRef = useRef({ active: false, used: false, y: 0 });
+
+  /** Where the current press started, for telling clicks from camera drags */
+  const pressOriginRef = useRef<{ x: number; y: number } | null>(null);
+
   const pendingDragRef = useRef<{
     instanceId: string;
     startX: number;
     startY: number;
     gridPoint?: GridPosition;
+    /** Pressed with the right button: this drag moves the part in height */
+    vertical?: boolean;
   } | null>(null);
 
   const [drawDrag, setDrawDrag] = useState<{ start: GridPosition; current: GridPosition } | null>(null);
@@ -1983,13 +2301,15 @@ export function ViewportCanvas(props: ViewportProps) {
   const handlePartPointerDown = useCallback(
     (instanceId: string, nativeEvent: PointerEvent, hit?: THREE.Vector3) => {
       if (props.mode.type !== "select") return;
-      if (nativeEvent.button !== 0) return; // right button cancels, middle pans — neither selects
+      // Left drags the footprint, right drags the height; middle is left to panning
+      if (nativeEvent.button !== 0 && nativeEvent.button !== 2) return;
       pendingDragRef.current = {
         instanceId,
         startX: nativeEvent.clientX,
         startY: nativeEvent.clientY,
         // Kept so a click on an already-selected part can resolve which spot was hit
         gridPoint: hit ? snapToGrid(hit) : undefined,
+        vertical: nativeEvent.button === 2,
       };
     },
     [props.mode],
@@ -1998,6 +2318,15 @@ export function ViewportCanvas(props: ViewportProps) {
   // Window-level pointer move/up for drag detection and box-select
   useEffect(() => {
     const handlePointerMove = (e: PointerEvent) => {
+      // While a part is dragged the left button is already down, so the right button
+      // never arrives as its own pointerdown — only as a chorded move. Reading
+      // `buttons` here is what makes holding it detectable at all.
+      if (dragState) {
+        const held = (e.buttons & 2) !== 0;
+        verticalDragRef.current.active = held;
+        if (held) verticalDragRef.current.used = true;
+      }
+
       // Box-select tracking
       const boxStart = boxSelectRef.current;
       if (boxStart) {
@@ -2028,6 +2357,12 @@ export function ViewportCanvas(props: ViewportProps) {
           const def = getPartDefinition(part.definitionId);
           const groundLift = def ? computeGroundLift(def, part.rotation, part.orientation ?? "y") : 0;
           setYLift(Math.max(0, part.position[1] - groundLift));
+          // A right-initiated drag is vertical from its very first frame
+          verticalDragRef.current = {
+            active: !!pending.vertical,
+            used: !!pending.vertical,
+            y: part.position[1],
+          };
           setDragState({
             instanceId: part.instanceId,
             definitionId: part.definitionId,
@@ -2112,6 +2447,11 @@ export function ViewportCanvas(props: ViewportProps) {
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
       if (e.key === "Escape") {
+        // The panel owns Escape while it is open
+        if (lightPanelOpen) {
+          setLightPanelOpen(false);
+          return;
+        }
         cancelCurrentAction();
       } else if ((e.key === "Delete" || e.key === "Backspace") && props.selectedPartIds.size > 0) {
         props.onDeleteSelected();
@@ -2229,6 +2569,7 @@ export function ViewportCanvas(props: ViewportProps) {
     isPlacingSupport,
     rotateAxis,
     dragState,
+    lightPanelOpen,
   ]);
 
   // Shared by the Escape key and the right-click gesture
@@ -2249,8 +2590,13 @@ export function ViewportCanvas(props: ViewportProps) {
   // Start box-select on shift+pointerdown on empty space
   const handleViewportPointerDown = useCallback(
     (e: React.PointerEvent) => {
+      // Remembered for every press: the scene needs it to tell a click from the tail
+      // end of a camera drag, which the browser reports as a click all the same
+      pressOriginRef.current = { x: e.clientX, y: e.clientY };
       if (e.button === 2) {
-        rightPressRef.current = { x: e.clientX, y: e.clientY };
+        // A right press that landed on a part starts a height drag, so it must not
+        // also register as the click that cancels or deselects
+        rightPressRef.current = pendingDragRef.current ? null : { x: e.clientX, y: e.clientY };
         return;
       }
       if (props.mode.type !== "select") return;
@@ -2272,15 +2618,6 @@ export function ViewportCanvas(props: ViewportProps) {
       cancelCurrentAction();
     },
     [cancelCurrentAction],
-  );
-
-  // While a part is being dragged the left button is already down, so the right
-  // button reports as a chorded pointermove rather than pointerdown/pointerup.
-  const handleViewportPointerMove = useCallback(
-    (e: React.PointerEvent) => {
-      if (e.button === 2 && dragState) cancelCurrentAction();
-    },
-    [dragState, cancelCurrentAction],
   );
 
   // The viewport owns the right button, so the native menu never applies here
@@ -2319,11 +2656,10 @@ export function ViewportCanvas(props: ViewportProps) {
       data-placing={props.mode.type === "place" ? props.mode.definitionId : undefined}
       data-drawing={props.mode.type === "draw" ? "true" : undefined}
       onPointerDown={handleViewportPointerDown}
-      onPointerMove={handleViewportPointerMove}
       onPointerUp={handleViewportPointerUp}
       onContextMenu={handleViewportContextMenu}
     >
-      <Canvas gl={{ antialias: true }} scene={{ background: new THREE.Color("#3d3d5c") }}>
+      <Canvas shadows gl={{ antialias: true }} scene={{ background: new THREE.Color("#3d3d5c") }}>
         {isOrthographic ? (
           <OrthographicCamera makeDefault position={[150, 200, 150]} near={-20000} far={20000} zoom={1} />
         ) : (
@@ -2339,6 +2675,9 @@ export function ViewportCanvas(props: ViewportProps) {
           dragState={dragState}
           dropTargetRef={dropTargetRef}
           onPartPointerDown={handlePartPointerDown}
+          verticalDragRef={verticalDragRef}
+          pressOriginRef={pressOriginRef}
+          light={light}
           yLift={yLift}
           boxSelectActive={!!boxSelectRect}
           collidingPartIds={collidingPartIds}
@@ -2350,12 +2689,33 @@ export function ViewportCanvas(props: ViewportProps) {
           onResizePreview={setResizePreview}
           selectedResizable={selectedResizable}
         />
-        {mirrorMinimap && <MirrorMinimap />}
+        {(mirrorMinimap || junctionCell) && <ViewportInsets mirror={mirrorMinimap} junction={junctionCell} />}
       </Canvas>
-      {mirrorMinimap && (
-        <div className="viewport-minimap" aria-hidden="true">
-          <span className="viewport-minimap__label">Mirror y=0</span>
-        </div>
+      {mirrorMinimap &&
+        (() => {
+          const rect = mirrorRect();
+          return (
+            <div className="viewport-inset" style={insetStyle(rect)} aria-hidden="true">
+              <span className="viewport-inset__label">Mirror y=0</span>
+            </div>
+          );
+        })()}
+      {junctionCell &&
+        JUNCTION_VIEWS.map((view, index) => (
+          <div key={view.key} className="viewport-inset" style={insetStyle(junctionRect(index))} aria-hidden="true">
+            <span className="viewport-inset__label">{view.label}</span>
+          </div>
+        ))}
+      <button
+        className={`viewport-shadow-toggle${light.shadows ? " viewport-mirror-toggle--on" : ""}`}
+        type="button"
+        onClick={() => setLightPanelOpen(true)}
+        title="Lighting and shadow settings"
+      >
+        Shadows
+      </button>
+      {lightPanelOpen && (
+        <ShadowSettings settings={light} onChange={setLight} onClose={() => setLightPanelOpen(false)} />
       )}
       <button
         className={`viewport-mirror-toggle${mirrorMinimap ? " viewport-mirror-toggle--on" : ""}`}

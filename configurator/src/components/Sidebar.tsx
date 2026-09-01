@@ -11,7 +11,16 @@ import {
   replaceCustomPart,
 } from "../data/custom-parts";
 import { useThumbnail } from "../thumbnails/useThumbnail";
-import type { DrawAxis, InteractionMode, PartCategory, PartDefinition } from "../types";
+import type {
+  Direction,
+  DrawAxis,
+  GridPosition,
+  InteractionMode,
+  PartCategory,
+  PartDefinition,
+  Rotation3,
+} from "../types";
+import type { TopologySuggestion } from "../assembly/compatibility";
 
 interface SidebarProps {
   onSelectPart: (definitionId: string) => void;
@@ -24,6 +33,10 @@ interface SidebarProps {
   /** Parts that fit the picked spot, or null when the filter is off */
   compatibleDefinitionIds: Set<string> | null;
   onDrawMode: (axis: DrawAxis) => void;
+  /** Branches meeting at the picked spot, and the connectors whose arms match them */
+  topology: { cell: GridPosition; branches: Direction[]; suggestions: TopologySuggestion[] } | null;
+  onPlaceAtPoint: (definitionId: string, position: GridPosition, rotation: Rotation3) => void;
+  onHoverSuggestion: (preview: { definitionId: string; position: GridPosition; rotation: Rotation3 } | null) => void;
 }
 
 const SECTIONS: {
@@ -107,6 +120,9 @@ export function Sidebar({
   onToggleFilterByPosition,
   compatibleDefinitionIds,
   onDrawMode,
+  topology,
+  onPlaceAtPoint,
+  onHoverSuggestion,
 }: SidebarProps) {
   const activePlaceId = activeMode.type === "place" ? activeMode.definitionId : null;
 
@@ -227,6 +243,37 @@ export function Sidebar({
           }}
         />
       </div>
+
+      {topology && (
+        <div className="catalog-section sidebar-topology">
+          <h2 className="catalog-section-title">
+            Fits this junction
+            <span className="catalog-section-count">
+              {topology.branches.length} {topology.branches.length === 1 ? "branch" : "branches"}
+            </span>
+          </h2>
+          {topology.suggestions.length === 0 ? (
+            <p className="sidebar-topology-empty">
+              No connector has exactly {topology.branches.length} arms reaching {topology.branches.join(", ")}.
+            </p>
+          ) : (
+            <div className="catalog-grid" onPointerLeave={() => onHoverSuggestion(null)}>
+              {topology.suggestions.map(({ def, rotation }) => (
+                <div
+                  key={def.id}
+                  onPointerEnter={() => onHoverSuggestion({ definitionId: def.id, position: topology.cell, rotation })}
+                >
+                  <PartButton
+                    part={def}
+                    isActive={false}
+                    onSelect={() => onPlaceAtPoint(def.id, topology.cell, rotation)}
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {hasSelectedPoint && (
         <label className="sidebar-position-filter">

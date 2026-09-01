@@ -29,6 +29,9 @@ import {
   attachmentPointsOf,
   compatiblePartsAt,
   nearestAttachmentPoint,
+  branchDirectionsAt,
+  targetCellOf,
+  topologySuggestionsAt,
 } from "../assembly/compatibility";
 import {
   findBestSnap,
@@ -117,7 +120,13 @@ assembly.subscribe(() => {
 };
 (window as any).__placedPartBounds = placedPartBounds;
 (window as any).__resolveDraw = resolveDraw;
-(window as any).__compat = { attachmentPointsOf, nearestAttachmentPoint, compatiblePartsAt };
+(window as any).__compat = {
+  attachmentPointsOf,
+  nearestAttachmentPoint,
+  compatiblePartsAt,
+  branchDirectionsAt,
+  topologySuggestionsAt,
+};
 (window as any).__gravity = {
   placementCollides,
   placementFloor,
@@ -628,6 +637,38 @@ export function App() {
     return selectedPoint;
   }, [selectedPoint, selectedPartIds]);
 
+  /** Connectors whose arm layout matches the branches meeting at the picked spot */
+  const topology = useMemo(() => {
+    if (!activePoint) return null;
+    const cell = targetCellOf(activePoint);
+    const found = topologySuggestionsAt(assembly, cell);
+    return found.suggestions.length > 0 || found.branches.length > 0 ? { cell, ...found } : null;
+    // snapshot.parts is in the deps because the branches depend on what is placed
+  }, [activePoint, snapshot.parts]);
+
+  /** Suggestion under the cursor in the sidebar, ghosted at its spot */
+  const [previewSuggestion, setPreviewSuggestion] = useState<{
+    definitionId: string;
+    position: GridPosition;
+    rotation: Rotation3;
+  } | null>(null);
+
+  // The suggestion list unmounts when the picked spot changes, and an unmounting
+  // element fires no pointerleave — so drop the ghost here rather than rely on it
+  useEffect(() => {
+    setPreviewSuggestion(null);
+  }, [activePoint]);
+
+  /** Drop a suggestion straight onto the spot it was suggested for */
+  const handlePlaceAtPoint = useCallback(
+    (definitionId: string, position: GridPosition, rotation: Rotation3) => {
+      handlePlacePart(definitionId, position, rotation);
+      setSelectedPoint(null);
+      setPreviewSuggestion(null);
+    },
+    [handlePlacePart],
+  );
+
   const compatibleDefinitionIds = useMemo(() => {
     if (!activePoint || !filterByPosition || selectedPartIds.size !== 1) return null;
     const part = assembly.getPartById([...selectedPartIds][0]);
@@ -1059,6 +1100,9 @@ export function App() {
         onToggleFilterByPosition={() => setFilterByPosition((v) => !v)}
         compatibleDefinitionIds={compatibleDefinitionIds}
         onDrawMode={handleDrawMode}
+        topology={topology}
+        onPlaceAtPoint={handlePlaceAtPoint}
+        onHoverSuggestion={setPreviewSuggestion}
       />
       <div className="main-area">
         <Toolbar
@@ -1093,6 +1137,7 @@ export function App() {
           onMoveSelectedParts={handleMoveSelectedParts}
           onClickPart={handleClickPart}
           selectedPoint={activePoint}
+          previewSuggestion={previewSuggestion}
           onClickEmpty={handleClickEmpty}
           onBoxSelect={handleBoxSelect}
           onNudgeParts={handleNudgeParts}
