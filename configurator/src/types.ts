@@ -78,7 +78,11 @@ export interface ClipboardData {
 export type InteractionMode =
   | { type: "select" }
   | { type: "place"; definitionId: string }
-  | { type: "paste"; clipboard: ClipboardData };
+  | { type: "paste"; clipboard: ClipboardData }
+  | { type: "draw"; axis: DrawAxis };
+
+/** Which way a draw drag lays parts out */
+export type DrawAxis = "horizontal" | "vertical";
 
 /** State for a part being dragged */
 export interface DragState {

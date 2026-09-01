@@ -10,7 +10,7 @@ import {
 } from "@react-three/drei";
 import { useCallback, useRef, useState, useEffect, useMemo, Suspense, useLayoutEffect } from "react";
 import * as THREE from "three";
-import { BASE_UNIT, PART_COLORS, GRID_EXTENT } from "../constants";
+import { BASE_UNIT, PART_COLORS, GRID_EXTENT, WORKSPACE_EXTENT } from "../constants";
 import type {
   PlacedPart,
   InteractionMode,
@@ -20,6 +20,7 @@ import type {
   Axis,
   DragState,
   ClipboardData,
+  DrawAxis,
 } from "../types";
 import { getPartDefinition } from "../data/catalog";
 import { isCustomPart, getCustomPartGeometry } from "../data/custom-parts";
@@ -30,11 +31,21 @@ import {
   orientationToRotation,
   transformCell,
   rotateGridCells,
+  clampToWorkspace,
+  clampCellToWorkspace,
   computeGroundLift,
 } from "../assembly/grid-utils";
 import { findBestSnap, findBestConnectorSnap, type GridRay } from "../assembly/snap";
 import { detectCollidingPartIds, detectCollidingPartIdsMesh } from "../assembly/collision";
 import { registerPartGeometry, hasRegisteredGeometry } from "../assembly/geometry-registry";
+import { ResizeHandles, type ResizePreview } from "./ResizeHandles";
+import { resizeEnvelopeOf, bestPartForSize, clampToSupportLength, MAX_SUPPORT_LENGTH } from "../assembly/part-sizing";
+import { resolveDraw } from "../assembly/draw";
+import { type AttachmentPoint, targetCellOf } from "../assembly/compatibility";
+import { settleWithGravity, placementIsGrounded } from "../assembly/gravity";
+
+/** Pointer travel (px) above which a press counts as a drag rather than a click */
+const DRAG_THRESHOLD = 5;
 
 /**
  * Create a MeshStandardMaterial with a custom color, preserving surface detail
@@ -70,9 +81,13 @@ interface ViewportProps {
     rotation: PlacedPart["rotation"],
     orientation?: Axis,
   ) => void;
+  onDraw: (position: GridPosition, size: [number, number, number]) => void;
+  onResizePart: (instanceId: string, position: GridPosition, size: [number, number, number]) => void;
   onMovePart: (instanceId: string, newPosition: GridPosition, rotation?: Rotation3, orientation?: Axis) => void;
   onMoveSelectedParts: (primaryId: string, newPosition: GridPosition, rotation?: Rotation3, orientation?: Axis) => void;
-  onClickPart: (instanceId: string, shiftKey: boolean) => void;
+  onClickPart: (instanceId: string, shiftKey: boolean, gridPoint?: GridPosition) => void;
+  /** Attachment point picked by re-clicking the selected part, highlighted in the scene */
+  selectedPoint: AttachmentPoint | null;
   onClickEmpty: () => void;
   onDeleteSelected: () => void;
   onPasteParts: (clipboard: ClipboardData, targetPosition: GridPosition, extraRotation?: Rotation3) => void;
@@ -84,11 +99,96 @@ interface ViewportProps {
   flashPartId: string | null;
   flashDefinitionId: string | null;
   snapEnabled: boolean;
+  gravityEnabled: boolean;
   showCollisions: boolean;
   fineMeshCollisions: boolean;
 }
 
+/** Compute the 1×1×N span on the ground from drag start/end cells. */
+export function computeDrawSpan(
+  start: GridPosition,
+  end: GridPosition,
+  axis: DrawAxis = "horizontal",
+): { position: GridPosition; size: [number, number, number] } {
+  // The cell the drag started on stays anchored, so capping the length shortens the
+  // far end rather than sliding the whole bar away from where the drag began.
+  if (axis === "vertical") {
+    // An upright bar stands on the cell that was clicked and grows towards the sky
+    const n = Math.min(Math.max(1, end[1] - start[1] + 1), MAX_SUPPORT_LENGTH);
+    return { position: [start[0], start[1], start[2]], size: [1, n, 1] };
+  }
+
+  const dx = end[0] - start[0];
+  const dz = end[2] - start[2];
+  if (Math.abs(dx) >= Math.abs(dz)) {
+    const n = Math.min(Math.abs(dx) + 1, MAX_SUPPORT_LENGTH);
+    const minX = dx < 0 ? start[0] - (n - 1) : start[0];
+    return { position: [minX, start[1], start[2]], size: [n, 1, 1] };
+  }
+  const n = Math.min(Math.abs(dz) + 1, MAX_SUPPORT_LENGTH);
+  const minZ = dz < 0 ? start[2] - (n - 1) : start[2];
+  return { position: [start[0], start[1], minZ], size: [1, 1, n] };
+}
+
 const CAMERA_MODE_STORAGE_KEY = "homeracker-camera-orthographic";
+const MIRROR_STORAGE_KEY = "homeracker-mirror-minimap";
+
+/** Fraction of the viewport the mirror inset takes up, and its margin in CSS px */
+const MINIMAP_SCALE = 0.26;
+const MINIMAP_MARGIN = 16;
+
+/**
+ * Inset showing the scene from the camera's mirror image through the ground plane —
+ * the underside of the assembly.
+ *
+ * Taking a render priority means R3F hands rendering over entirely, so the main
+ * view has to be drawn here too. The inset is confined with a scissor, which also
+ * keeps `render`'s own clear from wiping the main image.
+ */
+function MirrorMinimap() {
+  const { gl, scene, camera, size, controls } = useThree();
+  const mirrorCamera = useMemo(() => new THREE.PerspectiveCamera(50, 1, 1, 10000), []);
+  const target = useMemo(() => new THREE.Vector3(), []);
+
+  useFrame(() => {
+    const ratio = gl.getPixelRatio();
+    const width = Math.max(1, Math.round(size.width * ratio));
+    const height = Math.max(1, Math.round(size.height * ratio));
+
+    // Main view
+    gl.setScissorTest(false);
+    gl.setViewport(0, 0, width, height);
+    gl.render(scene, camera);
+
+    const orbit = controls as { target?: THREE.Vector3 } | null;
+    target.copy(orbit?.target ?? new THREE.Vector3());
+
+    // Reflect both the eye and what it looks at; world up is kept so the inset
+    // reads the right way round rather than upside down like a true mirror
+    mirrorCamera.position.set(camera.position.x, -camera.position.y, camera.position.z);
+    mirrorCamera.up.set(0, 1, 0);
+    mirrorCamera.lookAt(target.x, -target.y, target.z);
+
+    const insetWidth = Math.max(1, Math.round(width * MINIMAP_SCALE));
+    const insetHeight = Math.max(1, Math.round(height * MINIMAP_SCALE));
+    mirrorCamera.aspect = insetWidth / insetHeight;
+    mirrorCamera.updateProjectionMatrix();
+
+    const margin = Math.round(MINIMAP_MARGIN * ratio);
+    const x = width - insetWidth - margin;
+    const y = margin;
+
+    gl.setScissorTest(true);
+    gl.setViewport(x, y, insetWidth, insetHeight);
+    gl.setScissor(x, y, insetWidth, insetHeight);
+    gl.render(scene, mirrorCamera);
+
+    gl.setScissorTest(false);
+    gl.setViewport(0, 0, width, height);
+  }, 1);
+
+  return null;
+}
 
 type CameraSwitchSnapshot = {
   position: THREE.Vector3;
@@ -227,6 +327,97 @@ function PartMesh({
       />
     </Suspense>
   );
+}
+
+/** Marks the spot a re-click picked on the selected part, and where a part would go */
+function AttachmentMarker({ point }: { point: AttachmentPoint }) {
+  const worldPos = gridToWorld(targetCellOf(point));
+  // A pull-through spot sits inside the part, so its marker has to sit around the
+  // cell as a collar instead of inside it, where the mesh would swallow it
+  const side = BASE_UNIT * (point.fit === "through" ? 1.25 : 0.9);
+  return (
+    <group position={worldPos}>
+      <mesh>
+        <boxGeometry args={[side, side, side]} />
+        <meshBasicMaterial color={PART_COLORS.ghost_snapped} wireframe transparent opacity={0.95} />
+      </mesh>
+      <mesh>
+        <boxGeometry args={[side, side, side]} />
+        <meshBasicMaterial color={PART_COLORS.ghost_snapped} transparent opacity={0.18} depthWrite={false} />
+      </mesh>
+    </group>
+  );
+}
+
+/** Ghost box while dragging out the span of a new support */
+function DrawSpanGhost({ position, size }: { position: GridPosition; size: [number, number, number] }) {
+  const [sx, sy, sz] = size;
+  const worldPos = gridToWorld(position);
+  const offset: [number, number, number] = [
+    ((sx - 1) / 2) * BASE_UNIT,
+    ((sy - 1) / 2) * BASE_UNIT,
+    ((sz - 1) / 2) * BASE_UNIT,
+  ];
+  return (
+    <group position={worldPos}>
+      <mesh position={offset}>
+        <boxGeometry args={[sx * BASE_UNIT * 0.98, sy * BASE_UNIT * 0.98, sz * BASE_UNIT * 0.98]} />
+        <meshStandardMaterial color={PART_COLORS.ghost_valid} transparent opacity={0.4} depthWrite={false} />
+      </mesh>
+      <mesh position={offset}>
+        <boxGeometry args={[sx * BASE_UNIT * 0.98, sy * BASE_UNIT * 0.98, sz * BASE_UNIT * 0.98]} />
+        <meshBasicMaterial color={PART_COLORS.ghost_valid} wireframe transparent opacity={0.8} />
+      </mesh>
+    </group>
+  );
+}
+
+/**
+ * While a resize is in flight, show what the part will become: the catalog part
+ * that fills the dragged length, keeping its current definition when none does.
+ */
+function previewDefinitionId(part: PlacedPart, size: [number, number, number]): string {
+  const match = bestPartForSize(clampToSupportLength(size), getPartDefinition(part.definitionId)?.category);
+  return match ? match.id : part.definitionId;
+}
+
+/** Outline of the buildable area, so its edge is visible rather than a mystery wall */
+function WorkspaceBounds() {
+  const points = useMemo(() => {
+    const e = WORKSPACE_EXTENT * BASE_UNIT + BASE_UNIT / 2;
+    return new Float32Array([-e, 0, -e, e, 0, -e, e, 0, e, -e, 0, e]);
+  }, []);
+  return (
+    <lineLoop position={[0, 0.05, 0]}>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" args={[points, 3]} />
+      </bufferGeometry>
+      <lineBasicMaterial color={PART_COLORS.selected} transparent opacity={0.9} />
+    </lineLoop>
+  );
+}
+
+/**
+ * 1×1×1 cell that follows the cursor before a draw drag starts. Under gravity it
+ * sits on top of whatever is already there, so the cell you are about to anchor on
+ * is the cell the part will actually start from.
+ */
+function DrawSpanCursor({ assembly, gravityEnabled }: { assembly: AssemblyState; gravityEnabled: boolean }) {
+  const { camera, raycaster, pointer } = useThree();
+  const [gridPos, setGridPos] = useState<GridPosition>([0, 0, 0]);
+  const plane = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), []);
+  const intersectPoint = useMemo(() => new THREE.Vector3(), []);
+
+  useFrame(() => {
+    raycaster.setFromCamera(pointer, camera);
+    if (!raycaster.ray.intersectPlane(plane, intersectPoint)) return;
+    const grid = clampCellToWorkspace(snapToGrid(intersectPoint));
+    grid[1] = 0;
+    const settled = resolveDraw(assembly, grid, [1, 1, 1], gravityEnabled)?.position ?? grid;
+    setGridPos((prev) => (prev[0] === settled[0] && prev[1] === settled[1] && prev[2] === settled[2] ? prev : settled));
+  });
+
+  return <DrawSpanGhost position={gridPos} size={[1, 1, 1]} />;
 }
 
 /** Rendered mesh for a custom STL-imported part */
@@ -447,9 +638,10 @@ function PartMeshLoaded({
   const orientEuler = degreesToEuler(orientationToRotation(part.orientation ?? "y"));
   // Compute offset from oriented THEN rotated cells — placed outside both rotation groups
   const orient = part.orientation ?? "y";
-  const orientedCells = def.gridCells.map((c) => transformCell(c, orient));
-  const rotatedCells = rotateGridCells(orientedCells, part.rotation);
-  const offset = modelCenterOffset({ gridCells: rotatedCells });
+  // Rotate then orient — the same order AssemblyState uses to claim grid cells
+  const rotatedCells = rotateGridCells(def.gridCells, part.rotation);
+  const orientedCells = rotatedCells.map((c) => transformCell(c, orient));
+  const offset = modelCenterOffset({ gridCells: orientedCells });
 
   return (
     <group
@@ -464,8 +656,8 @@ function PartMeshLoaded({
       }}
     >
       <group position={offset}>
-        <group rotation={partEuler}>
-          <group rotation={orientEuler}>
+        <group rotation={orientEuler}>
+          <group rotation={partEuler}>
             <primitive ref={groupRef} object={cloned} />
           </group>
         </group>
@@ -498,8 +690,8 @@ function PartMeshFallback({
 
   // Use oriented + rotated cells for correct sizing and offset
   const orient = part.orientation ?? "y";
-  const orientedCells = def.gridCells.map((c) => transformCell(c, orient));
-  const cells = rotateGridCells(orientedCells, part.rotation);
+  // Rotate then orient — the same order AssemblyState uses to claim grid cells
+  const cells = rotateGridCells(def.gridCells, part.rotation).map((c) => transformCell(c, orient));
   const offset = modelCenterOffset({ gridCells: cells });
 
   const minX = Math.min(...cells.map((c) => c[0]));
@@ -553,6 +745,13 @@ function GhostModel({
   orientation?: Axis;
   isSnapped?: boolean;
 }) {
+  const def = getPartDefinition(definitionId);
+  if (!def) return null;
+
+  if (!def.modelPath) {
+    return <GhostFallback definitionId={definitionId} orientation={orientation} isSnapped={isSnapped} />;
+  }
+
   if (isCustomPart(definitionId)) {
     return <CustomGhostModel definitionId={definitionId} rotation={rotation} isSnapped={isSnapped} />;
   }
@@ -597,15 +796,15 @@ function GLBGhostModel({
   const euler = degreesToEuler(rotation);
   const orient = orientation ?? "y";
   const orientEuler = degreesToEuler(orientationToRotation(orient));
-  // Compute offset from oriented THEN rotated cells — placed outside both rotation groups
-  const orientedCells = def.gridCells.map((c) => transformCell(c, orient));
-  const rotatedCells = rotateGridCells(orientedCells, rotation);
-  const offset = modelCenterOffset({ gridCells: rotatedCells });
+  // Rotate then orient — the same order AssemblyState uses to claim grid cells
+  const rotatedCells = rotateGridCells(def.gridCells, rotation);
+  const orientedCells = rotatedCells.map((c) => transformCell(c, orient));
+  const offset = modelCenterOffset({ gridCells: orientedCells });
 
   return (
     <group position={offset}>
-      <group rotation={euler}>
-        <group rotation={orientEuler}>
+      <group rotation={orientEuler}>
+        <group rotation={euler}>
           <primitive ref={groupRef} object={cloned} />
         </group>
       </group>
@@ -645,8 +844,16 @@ function CustomGhostModel({
   );
 }
 
-/** Fallback box while ghost GLB is loading */
-function GhostFallback({ definitionId, orientation }: { definitionId: string; orientation?: Axis }) {
+/** Fallback box while the ghost GLB is loading, or for a part with no model */
+function GhostFallback({
+  definitionId,
+  orientation,
+  isSnapped,
+}: {
+  definitionId: string;
+  orientation?: Axis;
+  isSnapped?: boolean;
+}) {
   const def = getPartDefinition(definitionId);
   if (!def) return null;
 
@@ -664,12 +871,13 @@ function GhostFallback({ definitionId, orientation }: { definitionId: string; or
   const sizeX = (maxX - minX + 1) * BASE_UNIT;
   const sizeY = (maxY - minY + 1) * BASE_UNIT;
   const sizeZ = (maxZ - minZ + 1) * BASE_UNIT;
+  const color = isSnapped ? PART_COLORS.ghost_snapped : PART_COLORS.ghost_valid;
 
   // No rotation needed — box dimensions already reflect oriented space
   return (
     <mesh position={offset}>
       <boxGeometry args={[sizeX * 0.95, sizeY * 0.95, sizeZ * 0.95]} />
-      <meshStandardMaterial color={PART_COLORS.ghost_valid} transparent opacity={0.4} depthWrite={false} />
+      <meshStandardMaterial color={color} transparent opacity={0.4} depthWrite={false} />
     </mesh>
   );
 }
@@ -704,6 +912,10 @@ function useGhostSnap({
   /** World-space grab offset [dx, dz] captured on first frame of a drag.
    *  When provided, the hook subtracts it from the cursor hit before snapping. */
   grabOffsetRef,
+  /** When set, a free placement settles under gravity: it climbs out of whatever
+   *  it overlaps, then falls onto the first thing below it (the ground otherwise).
+   *  The ids in the set count as absent — they are the parts being moved. */
+  gravityIgnoreIds,
   /** Optional ref written synchronously inside useFrame so click handlers
    *  always read the latest computed state without waiting for a React render. */
   syncRef,
@@ -718,6 +930,7 @@ function useGhostSnap({
   planeY?: number;
   initialPosition?: GridPosition;
   grabOffsetRef?: React.MutableRefObject<[number, number] | null>;
+  gravityIgnoreIds?: Set<string>;
   syncRef?: React.MutableRefObject<{
     position: GridPosition;
     orientation: Axis;
@@ -777,9 +990,22 @@ function useGhostSnap({
         : findBestConnectorSnap(assembly, definitionId, snapPos, 3, gridRay, ghostRotation)
       : null;
 
-    if (snap) {
-      const orient = isSupport ? snap.orientation : ghostOrientation;
-      const snapRotation: Rotation3 = isSupport ? [0, 0, 0] : (snap.autoRotation ?? ghostRotation);
+    const snapOrient = snap ? (isSupport ? snap.orientation : ghostOrientation) : ghostOrientation;
+    const snapRotation: Rotation3 = snap
+      ? isSupport
+        ? [0, 0, 0]
+        : (snap.autoRotation ?? ghostRotation)
+      : ghostRotation;
+
+    // Under gravity a socket is not enough: a downward socket can point through the
+    // floor, and the span it implies can run straight through another part.
+    const snapAllowed =
+      !!snap &&
+      (!gravityIgnoreIds ||
+        placementIsGrounded(assembly, definitionId, snap.position, snapRotation, snapOrient, gravityIgnoreIds));
+
+    if (snap && snapAllowed) {
+      const orient = snapOrient;
       const liftedSnapPos: GridPosition = [snap.position[0], snap.position[1], snap.position[2]];
       // Debug: expose ghost snap state for e2e tests
       (window as any).__ghostDebug = {
@@ -812,13 +1038,25 @@ function useGhostSnap({
     const lift = def ? computeGroundLift(def, ghostRotation, orient) : 0;
     cursorGrid[1] = lift + yLift;
 
+    // Keep the part in the buildable area instead of letting it follow the cursor
+    // off across the grid
+    const boundedPos = def
+      ? clampToWorkspace(rotateGridCells(def.gridCells, ghostRotation), cursorGrid, orient)
+      : cursorGrid;
+
+    // Gravity: climb out of anything in the way, then fall onto whatever is below
+    const freePos =
+      gravityIgnoreIds && def
+        ? settleWithGravity(assembly, definitionId, boundedPos, ghostRotation, orient, lift, gravityIgnoreIds)
+        : boundedPos;
+
     setEffectiveOrientation(orient);
     setEffectiveRotation(ghostRotation);
-    setGridPos(cursorGrid);
+    setGridPos(freePos);
     setIsSnapped(false);
     if (syncRef)
       syncRef.current = {
-        position: cursorGrid,
+        position: freePos,
         orientation: orient,
         rotation: ghostRotation,
         isSnapped: false,
@@ -837,6 +1075,7 @@ function GhostPreview({
   ghostStateRef,
   yLift,
   snapEnabled,
+  gravityEnabled,
   onPlacePart,
 }: {
   definitionId: string;
@@ -846,8 +1085,10 @@ function GhostPreview({
   ghostStateRef: React.MutableRefObject<GhostState>;
   yLift: number;
   snapEnabled: boolean;
+  gravityEnabled: boolean;
   onPlacePart: (definitionId: string, position: GridPosition, rotation: Rotation3, orientation: Axis) => void;
 }) {
+  const noParts = useMemo(() => new Set<string>(), []);
   const { gridPos, effectiveOrientation, effectiveRotation, isSnapped, def } = useGhostSnap({
     definitionId,
     assembly,
@@ -855,6 +1096,7 @@ function GhostPreview({
     ghostRotation,
     yLift,
     snapEnabled,
+    gravityIgnoreIds: gravityEnabled ? noParts : undefined,
     syncRef: ghostStateRef,
   });
 
@@ -899,6 +1141,7 @@ function DragPreview({
   dropTargetRef,
   yLift,
   snapEnabled,
+  gravityEnabled,
   selectedPartIds,
   parts,
 }: {
@@ -911,11 +1154,20 @@ function DragPreview({
   }>;
   yLift: number;
   snapEnabled: boolean;
+  gravityEnabled: boolean;
   selectedPartIds: Set<string>;
   parts: PlacedPart[];
 }) {
   const grabOffsetRef = useRef<[number, number] | null>(null);
   const partWorldY = gridToWorld(dragState.originalPosition)[1];
+
+  // Parts travelling with this drag move as one, so they never block each other
+  const gravityIgnoreIds = useMemo(() => {
+    if (!gravityEnabled) return undefined;
+    const ids = new Set<string>([dragState.instanceId]);
+    if (selectedPartIds.has(dragState.instanceId)) for (const id of selectedPartIds) ids.add(id);
+    return ids;
+  }, [gravityEnabled, dragState.instanceId, selectedPartIds]);
 
   const { gridPos, effectiveOrientation, isSnapped, def } = useGhostSnap({
     definitionId: dragState.definitionId,
@@ -927,6 +1179,7 @@ function DragPreview({
     planeY: partWorldY,
     initialPosition: dragState.originalPosition,
     grabOffsetRef,
+    gravityIgnoreIds,
   });
 
   // Keep dropTargetRef in sync
@@ -1076,8 +1329,7 @@ function FitCamera({ parts }: { parts: PlacedPart[] }) {
       const def = getPartDefinition(part.definitionId);
       if (!def) continue;
       const orient = part.orientation ?? "y";
-      const orientedCells = def.gridCells.map((c) => transformCell(c, orient));
-      const cells = rotateGridCells(orientedCells, part.rotation);
+      const cells = rotateGridCells(def.gridCells, part.rotation).map((c) => transformCell(c, orient));
       for (const cell of cells) {
         const wx = (part.position[0] + cell[0]) * BASE_UNIT;
         const wy = (part.position[1] + cell[1]) * BASE_UNIT + BASE_UNIT / 2;
@@ -1217,10 +1469,17 @@ interface SceneProps extends ViewportProps {
     orientation?: Axis;
     rotation?: Rotation3;
   }>;
-  onPartPointerDown: (instanceId: string, nativeEvent: PointerEvent) => void;
+  onPartPointerDown: (instanceId: string, nativeEvent: PointerEvent, hit?: THREE.Vector3) => void;
   yLift: number;
   boxSelectActive: boolean;
   collidingPartIds: Set<string>;
+  drawDrag: { start: GridPosition; current: GridPosition } | null;
+  onDrawPointerDown: (grid: GridPosition) => void;
+  onDrawPointerMove: (grid: GridPosition) => void;
+  onDrawPointerUp: () => void;
+  resizePreview: ResizePreview | null;
+  onResizePreview: (preview: ResizePreview | null) => void;
+  selectedResizable: { part: PlacedPart; origin: GridPosition; size: [number, number, number] } | null;
 }
 
 /** Scene contents — lives inside the Canvas */
@@ -1232,6 +1491,7 @@ function Scene({
   onPlacePart,
   onPasteParts,
   onClickEmpty,
+  onResizePart,
   ghostRotation,
   ghostOrientation,
   ghostStateRef,
@@ -1243,23 +1503,39 @@ function Scene({
   flashPartId,
   flashDefinitionId,
   snapEnabled,
+  gravityEnabled,
+  selectedPoint,
   boxSelectActive,
   collidingPartIds,
+  drawDrag,
+  onDrawPointerDown,
+  onDrawPointerMove,
+  onDrawPointerUp,
+  resizePreview,
+  onResizePreview,
+  selectedResizable,
 }: SceneProps) {
   const groundRef = useRef<THREE.Mesh>(null);
+  const [handleDragging, setHandleDragging] = useState(false);
+
+  const gridFromPointerEvent = useCallback((e: { point?: THREE.Vector3 }) => {
+    if (e.point) {
+      return snapToGrid(e.point);
+    }
+    return null;
+  }, []);
 
   const handleGroundClick = useCallback(
     (e: any) => {
-      if (dragState) return; // Don't handle ground clicks during drag
+      if (dragState) return;
+      if (mode.type === "draw") return; // handled by pointer up
       if (mode.type === "place") {
         e.stopPropagation();
         const gs = ghostStateRef.current;
-        console.log("[Ground] onClick place — placing at", gs.position, gs.rotation, gs.orientation);
         onPlacePart(mode.definitionId, gs.position, gs.rotation, gs.orientation);
       } else if (mode.type === "paste") {
         e.stopPropagation();
         const ps = pasteStateRef.current;
-        console.log("[Ground] onClick paste — pasting at", ps.position, "rotation", ghostRotation);
         onPasteParts(mode.clipboard, ps.position, ghostRotation);
       } else {
         onClickEmpty();
@@ -1267,6 +1543,45 @@ function Scene({
     },
     [mode, onPlacePart, onPasteParts, onClickEmpty, ghostStateRef, pasteStateRef, dragState, ghostRotation],
   );
+
+  const handleGroundPointerDown = useCallback(
+    (e: any) => {
+      if (mode.type !== "draw") return;
+      if (e.button !== 0) return; // right button cancels, middle pans — neither draws
+      e.stopPropagation();
+      const grid = gridFromPointerEvent(e);
+      if (!grid) return;
+      grid[1] = 0;
+      const anchor = clampCellToWorkspace(grid);
+      // Anchor where the part will actually rest, so an upright draw starts on top
+      // of whatever is already on that cell rather than inside it
+      const settled = resolveDraw(assembly, anchor, [1, 1, 1], gravityEnabled)?.position ?? anchor;
+      onDrawPointerDown(settled);
+    },
+    [mode, gridFromPointerEvent, onDrawPointerDown],
+  );
+
+  const handleGroundPointerMove = useCallback(
+    (e: any) => {
+      if (mode.type !== "draw" || !drawDrag) return;
+      e.stopPropagation();
+      const grid = gridFromPointerEvent(e);
+      if (!grid) return;
+      grid[1] = drawDrag?.start[1] ?? 0;
+      onDrawPointerMove(clampCellToWorkspace(grid));
+    },
+    [mode, drawDrag, gridFromPointerEvent, onDrawPointerMove],
+  );
+
+  // onDrawPointerUp is handled by window listeners in ViewportCanvas
+  void onDrawPointerUp;
+
+  const sceneDrawAxis: DrawAxis = mode.type === "draw" ? mode.axis : "horizontal";
+  const drawSpan = drawDrag ? computeDrawSpan(drawDrag.start, drawDrag.current, sceneDrawAxis) : null;
+  // Preview the settled placement, not the raw span — same resolver as the commit
+  const drawPreview = drawSpan
+    ? (resolveDraw(assembly, drawSpan.position, drawSpan.size, gravityEnabled) ?? drawSpan)
+    : null;
 
   return (
     <>
@@ -1278,8 +1593,13 @@ function Scene({
       <directionalLight position={[-50, 100, -50]} intensity={1.0} />
       <directionalLight position={[0, -100, 50]} intensity={0.8} />
 
-      {/* Camera controls — disabled during drag or box select */}
-      <OrbitControls makeDefault enableDamping dampingFactor={0.1} enabled={!dragState && !boxSelectActive} />
+      {/* Camera controls — disabled during drag, box select, draw, or handle resize */}
+      <OrbitControls
+        makeDefault
+        enableDamping
+        dampingFactor={0.1}
+        enabled={!dragState && !boxSelectActive && !drawDrag && !handleDragging}
+      />
 
       {/* Grid floor */}
       <Grid
@@ -1296,12 +1616,18 @@ function Scene({
         infiniteGrid
       />
 
+      {selectedPoint && <AttachmentMarker point={selectedPoint} />}
+
+      <WorkspaceBounds />
+
       {/* Invisible ground plane for raycasting */}
       <mesh
         ref={groundRef}
         rotation={[-Math.PI / 2, 0, 0]}
         position={[0, 0, 0]}
         onClick={handleGroundClick}
+        onPointerDown={handleGroundPointerDown}
+        onPointerMove={handleGroundPointerMove}
         visible={false}
       >
         <planeGeometry args={[GRID_EXTENT * BASE_UNIT * 4, GRID_EXTENT * BASE_UNIT * 4]} />
@@ -1314,18 +1640,44 @@ function Scene({
       </GizmoHelper>
 
       {/* Placed parts */}
-      {parts.map((part) => (
-        <PartMesh
-          key={part.instanceId}
-          part={part}
-          isSelected={selectedPartIds.has(part.instanceId)}
-          isDragging={dragState?.instanceId === part.instanceId}
-          isPlacing={mode.type === "place"}
-          isFlashing={flashPartId === part.instanceId || flashDefinitionId === part.definitionId}
-          isColliding={collidingPartIds.has(part.instanceId)}
-          onPointerDown={(e) => onPartPointerDown(part.instanceId, e.nativeEvent)}
-        />
-      ))}
+      {parts.map((part) => {
+        const preview = resizePreview && resizePreview.instanceId === part.instanceId ? resizePreview : null;
+        const renderPart: PlacedPart = preview
+          ? { ...part, definitionId: previewDefinitionId(part, preview.size), position: preview.position }
+          : part;
+        return (
+          <PartMesh
+            key={part.instanceId}
+            part={renderPart}
+            isSelected={selectedPartIds.has(part.instanceId)}
+            isDragging={dragState?.instanceId === part.instanceId}
+            isPlacing={mode.type === "place" || mode.type === "draw"}
+            isFlashing={flashPartId === part.instanceId || flashDefinitionId === part.definitionId}
+            isColliding={collidingPartIds.has(part.instanceId)}
+            onPointerDown={(e) => onPartPointerDown(part.instanceId, e.nativeEvent, e.point)}
+          />
+        );
+      })}
+
+      {selectedResizable && mode.type === "select" && !dragState && (
+        <>
+          <ResizeHandles
+            part={selectedResizable.part}
+            origin={selectedResizable.origin}
+            size={selectedResizable.size}
+            onPreview={onResizePreview}
+            onResize={onResizePart}
+            onDraggingChange={setHandleDragging}
+          />
+        </>
+      )}
+
+      {mode.type === "draw" &&
+        (drawPreview ? (
+          <DrawSpanGhost position={drawPreview.position} size={drawPreview.size} />
+        ) : (
+          <DrawSpanCursor assembly={assembly} gravityEnabled={gravityEnabled} />
+        ))}
 
       {/* Ghost preview in placement mode */}
       {mode.type === "place" && (
@@ -1337,6 +1689,7 @@ function Scene({
           ghostStateRef={ghostStateRef}
           yLift={yLift}
           snapEnabled={snapEnabled}
+          gravityEnabled={gravityEnabled}
           onPlacePart={onPlacePart}
         />
       )}
@@ -1349,6 +1702,7 @@ function Scene({
           dropTargetRef={dropTargetRef}
           yLift={yLift}
           snapEnabled={snapEnabled}
+          gravityEnabled={gravityEnabled}
           selectedPartIds={selectedPartIds}
           parts={parts}
         />
@@ -1372,6 +1726,22 @@ function Scene({
 export function ViewportCanvas(props: ViewportProps) {
   const [computingCollisions, setComputingCollisions] = useState(false);
   const [collidingPartIds, setCollidingPartIds] = useState<Set<string>>(new Set());
+  const [mirrorMinimap, setMirrorMinimap] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(MIRROR_STORAGE_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(MIRROR_STORAGE_KEY, mirrorMinimap ? "1" : "0");
+    } catch {
+      // Ignore storage errors
+    }
+  }, [mirrorMinimap]);
+
   const [isOrthographic, setIsOrthographic] = useState<boolean>(() => {
     try {
       return localStorage.getItem(CAMERA_MODE_STORAGE_KEY) === "1";
@@ -1411,7 +1781,102 @@ export function ViewportCanvas(props: ViewportProps) {
     instanceId: string;
     startX: number;
     startY: number;
+    gridPoint?: GridPosition;
   } | null>(null);
+
+  const [drawDrag, setDrawDrag] = useState<{ start: GridPosition; current: GridPosition } | null>(null);
+  const drawDragRef = useRef(drawDrag);
+  drawDragRef.current = drawDrag;
+  const [resizePreview, setResizePreview] = useState<ResizePreview | null>(null);
+
+  const handleDrawPointerDown = useCallback((grid: GridPosition) => {
+    setDrawDrag({ start: grid, current: grid });
+  }, []);
+
+  const handleDrawPointerMove = useCallback((grid: GridPosition) => {
+    setDrawDrag((prev) => (prev ? { ...prev, current: grid } : null));
+  }, []);
+
+  const drawAxis: DrawAxis = props.mode.type === "draw" ? props.mode.axis : "horizontal";
+
+  const handleDrawPointerUp = useCallback(() => {
+    const drag = drawDragRef.current;
+    if (!drag) return;
+    drawDragRef.current = null;
+    setDrawDrag(null);
+    const { position, size } = computeDrawSpan(drag.start, drag.current, drawAxis);
+    props.onDraw(position, size);
+  }, [props.onDraw, drawAxis]);
+
+  // Continue draw tracking even if the pointer leaves the ground mesh
+  useEffect(() => {
+    if (!drawDrag) return;
+    const hit = new THREE.Vector3();
+    const anchor = drawDrag.start;
+
+    // Horizontal drags read off the ground. An upright drag needs a vertical plane
+    // through the anchor cell, turned to face the camera so the height tracks the
+    // cursor no matter which way the scene is orbited.
+    // At the anchor cell's centre height, matching how the drag preview picks its
+    // plane — reading the span off y=0 instead would skew it under perspective
+    const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -gridToWorld(anchor)[1]);
+    const uprightPlane = new THREE.Plane();
+    const anchorWorld = new THREE.Vector3(...gridToWorld(anchor));
+
+    const handleMove = (e: PointerEvent) => {
+      const camera = (window as any).__camera as THREE.Camera | undefined;
+      const canvas = document.querySelector(".viewport canvas") as HTMLCanvasElement | null;
+      if (!camera || !canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const ndc = new THREE.Vector2(
+        ((e.clientX - rect.left) / rect.width) * 2 - 1,
+        -((e.clientY - rect.top) / rect.height) * 2 + 1,
+      );
+      const raycaster = new THREE.Raycaster();
+      raycaster.setFromCamera(ndc, camera);
+
+      if (drawAxis === "vertical") {
+        const normal = new THREE.Vector3();
+        camera.getWorldDirection(normal);
+        normal.y = 0;
+        if (normal.lengthSq() < 1e-6) return; // looking straight down: no height to read
+        normal.normalize();
+        uprightPlane.setFromNormalAndCoplanarPoint(normal, anchorWorld);
+        if (!raycaster.ray.intersectPlane(uprightPlane, hit)) return;
+        const y = Math.max(anchor[1], Math.round((hit.y - BASE_UNIT / 2) / BASE_UNIT));
+        setDrawDrag((prev) => (prev ? { ...prev, current: [anchor[0], y, anchor[2]] } : null));
+        return;
+      }
+
+      if (!raycaster.ray.intersectPlane(groundPlane, hit)) return;
+      const grid = clampCellToWorkspace(snapToGrid(hit));
+      grid[1] = anchor[1];
+      setDrawDrag((prev) => (prev ? { ...prev, current: grid } : null));
+    };
+    const handleUp = () => {
+      handleDrawPointerUp();
+    };
+    window.addEventListener("pointermove", handleMove);
+    window.addEventListener("pointerup", handleUp);
+    return () => {
+      window.removeEventListener("pointermove", handleMove);
+      window.removeEventListener("pointerup", handleUp);
+    };
+  }, [drawDrag, handleDrawPointerUp, drawAxis]);
+
+  // Clear draw drag when leaving draw mode
+  useEffect(() => {
+    if (props.mode.type !== "draw") setDrawDrag(null);
+  }, [props.mode.type]);
+
+  const selectedResizable = useMemo(() => {
+    if (props.selectedPartIds.size !== 1) return null;
+    const id = [...props.selectedPartIds][0];
+    const part = props.parts.find((p) => p.instanceId === id);
+    if (!part) return null;
+    const envelope = resizeEnvelopeOf(part);
+    return envelope ? { part, ...envelope } : null;
+  }, [props.selectedPartIds, props.parts]);
 
   // Collision detection runs in the outer (DOM) React tree so state updates are visible
   useEffect(() => {
@@ -1516,12 +1981,15 @@ export function ViewportCanvas(props: ViewportProps) {
 
   // Handle pointer down on a part — records pending drag start
   const handlePartPointerDown = useCallback(
-    (instanceId: string, nativeEvent: PointerEvent) => {
+    (instanceId: string, nativeEvent: PointerEvent, hit?: THREE.Vector3) => {
       if (props.mode.type !== "select") return;
+      if (nativeEvent.button !== 0) return; // right button cancels, middle pans — neither selects
       pendingDragRef.current = {
         instanceId,
         startX: nativeEvent.clientX,
         startY: nativeEvent.clientY,
+        // Kept so a click on an already-selected part can resolve which spot was hit
+        gridPoint: hit ? snapToGrid(hit) : undefined,
       };
     },
     [props.mode],
@@ -1529,8 +1997,6 @@ export function ViewportCanvas(props: ViewportProps) {
 
   // Window-level pointer move/up for drag detection and box-select
   useEffect(() => {
-    const DRAG_THRESHOLD = 5;
-
     const handlePointerMove = (e: PointerEvent) => {
       // Box-select tracking
       const boxStart = boxSelectRef.current;
@@ -1625,7 +2091,7 @@ export function ViewportCanvas(props: ViewportProps) {
         }
         setDragState(null);
       } else {
-        props.onClickPart(pending.instanceId, e.shiftKey);
+        props.onClickPart(pending.instanceId, e.shiftKey, pending.gridPoint);
       }
       pendingDragRef.current = null;
     };
@@ -1646,12 +2112,7 @@ export function ViewportCanvas(props: ViewportProps) {
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
       if (e.key === "Escape") {
-        if (dragState) {
-          setDragState(null);
-          pendingDragRef.current = null;
-          return;
-        }
-        props.onEscape();
+        cancelCurrentAction();
       } else if ((e.key === "Delete" || e.key === "Backspace") && props.selectedPartIds.size > 0) {
         props.onDeleteSelected();
       } else if (dragState) {
@@ -1770,9 +2231,28 @@ export function ViewportCanvas(props: ViewportProps) {
     dragState,
   ]);
 
+  // Shared by the Escape key and the right-click gesture
+  const cancelCurrentAction = useCallback(() => {
+    if (dragState) {
+      setDragState(null);
+      pendingDragRef.current = null;
+      return;
+    }
+    drawDragRef.current = null;
+    setDrawDrag(null);
+    props.onEscape();
+  }, [dragState, props.onEscape]);
+
+  // Right-press origin, used to tell a cancelling right-click from a right-drag pan
+  const rightPressRef = useRef<{ x: number; y: number } | null>(null);
+
   // Start box-select on shift+pointerdown on empty space
   const handleViewportPointerDown = useCallback(
     (e: React.PointerEvent) => {
+      if (e.button === 2) {
+        rightPressRef.current = { x: e.clientX, y: e.clientY };
+        return;
+      }
       if (props.mode.type !== "select") return;
       if (!e.shiftKey) return;
       // If a part was clicked, pendingDragRef is already set — don't start box select
@@ -1782,21 +2262,53 @@ export function ViewportCanvas(props: ViewportProps) {
     [props.mode],
   );
 
+  // A stationary right-click acts as Escape; a right-drag still pans the camera
+  const handleViewportPointerUp = useCallback(
+    (e: React.PointerEvent) => {
+      const press = rightPressRef.current;
+      rightPressRef.current = null;
+      if (e.button !== 2 || !press) return;
+      if (Math.hypot(e.clientX - press.x, e.clientY - press.y) >= DRAG_THRESHOLD) return;
+      cancelCurrentAction();
+    },
+    [cancelCurrentAction],
+  );
+
+  // While a part is being dragged the left button is already down, so the right
+  // button reports as a chorded pointermove rather than pointerdown/pointerup.
+  const handleViewportPointerMove = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.button === 2 && dragState) cancelCurrentAction();
+    },
+    [dragState, cancelCurrentAction],
+  );
+
+  // The viewport owns the right button, so the native menu never applies here
+  const handleViewportContextMenu = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+  }, []);
+
   // Hint text
   let hintText: string | null = null;
   if (dragState) {
     const dragDef = getPartDefinition(dragState.definitionId);
     hintText =
       dragDef?.category === "support"
-        ? "T(X) R(Y) F(Z) rotate · O orientation · W/S raise/lower · Release to place · Esc cancel"
-        : "T(X) R(Y) F(Z) rotate · W/S raise/lower · Release to place · Esc cancel";
+        ? "T(X) R(Y) F(Z) rotate · O orientation · W/S raise/lower · Release to place · Right-click or Esc cancel"
+        : "T(X) R(Y) F(Z) rotate · W/S raise/lower · Release to place · Right-click or Esc cancel";
   } else if (props.mode.type === "place") {
     hintText = isPlacingSupport
-      ? "Click to place · T(X) R(Y) F(Z) rotate · O orientation · W/S raise/lower · Esc cancel"
-      : "Click to place · T(X) R(Y) F(Z) rotate · W/S raise/lower · Esc cancel";
-  } else if (props.mode.type === "select" && props.selectedPartIds.size > 0) {
+      ? "Click to place · T(X) R(Y) F(Z) rotate · O orientation · W/S raise/lower · Right-click or Esc cancel"
+      : "Click to place · T(X) R(Y) F(Z) rotate · W/S raise/lower · Right-click or Esc cancel";
+  } else if (props.mode.type === "draw") {
     hintText =
-      "Arrow keys nudge · Shift+arrow fine nudge · w/s up and down - ctrl-c/v copy/paste - Del delete · Esc deselect";
+      props.mode.axis === "vertical"
+        ? "Click a cell and drag up to stand a support · Right-click or Esc cancel"
+        : "Drag across the ground to lay down a support · Right-click or Esc cancel";
+  } else if (props.mode.type === "select" && props.selectedPartIds.size > 0) {
+    hintText = selectedResizable
+      ? "Drag face handles to resize · Suggested parts appear on the right · Del delete · Right-click or Esc deselect"
+      : "Arrow keys nudge · Shift+arrow fine nudge · w/s up and down - ctrl-c/v copy/paste - Del delete · Right-click or Esc deselect";
   } else if (props.mode.type === "paste") {
     hintText = `Click to paste ${props.mode.clipboard.parts.length} part(s) · T(X) R(Y) F(Z) rotate · Esc cancel`;
   }
@@ -1805,7 +2317,11 @@ export function ViewportCanvas(props: ViewportProps) {
     <div
       className="viewport"
       data-placing={props.mode.type === "place" ? props.mode.definitionId : undefined}
+      data-drawing={props.mode.type === "draw" ? "true" : undefined}
       onPointerDown={handleViewportPointerDown}
+      onPointerMove={handleViewportPointerMove}
+      onPointerUp={handleViewportPointerUp}
+      onContextMenu={handleViewportContextMenu}
     >
       <Canvas gl={{ antialias: true }} scene={{ background: new THREE.Color("#3d3d5c") }}>
         {isOrthographic ? (
@@ -1826,8 +2342,29 @@ export function ViewportCanvas(props: ViewportProps) {
           yLift={yLift}
           boxSelectActive={!!boxSelectRect}
           collidingPartIds={collidingPartIds}
+          drawDrag={drawDrag}
+          onDrawPointerDown={handleDrawPointerDown}
+          onDrawPointerMove={handleDrawPointerMove}
+          onDrawPointerUp={handleDrawPointerUp}
+          resizePreview={resizePreview}
+          onResizePreview={setResizePreview}
+          selectedResizable={selectedResizable}
         />
+        {mirrorMinimap && <MirrorMinimap />}
       </Canvas>
+      {mirrorMinimap && (
+        <div className="viewport-minimap" aria-hidden="true">
+          <span className="viewport-minimap__label">Mirror y=0</span>
+        </div>
+      )}
+      <button
+        className={`viewport-mirror-toggle${mirrorMinimap ? " viewport-mirror-toggle--on" : ""}`}
+        type="button"
+        onClick={() => setMirrorMinimap((v) => !v)}
+        title="Minimap showing the camera mirrored through the ground plane — the underside"
+      >
+        Mirror
+      </button>
       <button
         className={`viewport-camera-toggle ${isOrthographic ? "viewport-camera-toggle--ortho" : "viewport-camera-toggle--persp"}`}
         type="button"

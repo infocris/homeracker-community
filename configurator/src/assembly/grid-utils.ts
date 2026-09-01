@@ -1,4 +1,48 @@
 import type { GridPosition, Axis, Direction, Rotation3, RotationStep } from "../types";
+import { WORKSPACE_EXTENT, WORKSPACE_HEIGHT } from "../constants";
+
+/** Offset that brings a span back inside [lo, hi]. A span longer than the range
+ *  is anchored to `lo` — it has to overflow somewhere. */
+function shiftInto(min: number, max: number, lo: number, hi: number): number {
+  if (min < lo) return lo - min;
+  if (max > hi) return hi - max;
+  return 0;
+}
+
+/**
+ * Keep a placement inside the buildable area: shift it back until every cell it
+ * occupies sits within the workspace, so parts cannot wander off across the grid.
+ * `cells` are the part's cells after rotation, relative to its origin.
+ */
+export function clampToWorkspace(cells: GridPosition[], position: GridPosition, orientation: Axis = "y"): GridPosition {
+  if (cells.length === 0) return position;
+  const world = getWorldCells(cells, position, orientation);
+
+  const min: GridPosition = [Infinity, Infinity, Infinity];
+  const max: GridPosition = [-Infinity, -Infinity, -Infinity];
+  for (const cell of world) {
+    for (const i of [0, 1, 2] as const) {
+      if (cell[i] < min[i]) min[i] = cell[i];
+      if (cell[i] > max[i]) max[i] = cell[i];
+    }
+  }
+
+  return [
+    position[0] + shiftInto(min[0], max[0], -WORKSPACE_EXTENT, WORKSPACE_EXTENT),
+    position[1] + shiftInto(min[1], max[1], 0, WORKSPACE_HEIGHT),
+    position[2] + shiftInto(min[2], max[2], -WORKSPACE_EXTENT, WORKSPACE_EXTENT),
+  ];
+}
+
+/** Clamp a bare grid cell to the workspace footprint (used while drawing). */
+export function clampCellToWorkspace(cell: GridPosition): GridPosition {
+  const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
+  return [
+    clamp(cell[0], -WORKSPACE_EXTENT, WORKSPACE_EXTENT),
+    clamp(cell[1], 0, WORKSPACE_HEIGHT),
+    clamp(cell[2], -WORKSPACE_EXTENT, WORKSPACE_EXTENT),
+  ];
+}
 
 /**
  * Transform a grid cell offset based on support orientation.

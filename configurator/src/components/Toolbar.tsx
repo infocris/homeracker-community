@@ -13,6 +13,8 @@ interface ToolbarProps {
   mode: InteractionMode;
   snapEnabled: boolean;
   onToggleSnap: () => void;
+  gravityEnabled: boolean;
+  onToggleGravity: () => void;
   showCollisions: boolean;
   onToggleCollisions: () => void;
   fineMeshCollisions: boolean;
@@ -32,6 +34,8 @@ export function Toolbar({
   mode,
   snapEnabled,
   onToggleSnap,
+  gravityEnabled,
+  onToggleGravity,
   showCollisions,
   onToggleCollisions,
   fineMeshCollisions,
@@ -80,6 +84,13 @@ export function Toolbar({
           Snap: {snapEnabled ? "On" : "Off"}
         </button>
         <button
+          className={`toolbar-btn${!gravityEnabled ? " toolbar-btn-active" : ""}`}
+          onClick={onToggleGravity}
+          title="Parts rest on what is below them, and fall to the ground when nothing is"
+        >
+          Gravity: {gravityEnabled ? "On" : "Off"}
+        </button>
+        <button
           className={`toolbar-btn${showCollisions ? " toolbar-btn-active" : ""}`}
           onClick={onToggleCollisions}
           title="Highlight overlapping/colliding parts"
@@ -100,6 +111,15 @@ export function Toolbar({
       {mode.type === "place" && (
         <div className="toolbar-group">
           <span className="toolbar-mode-label">Placing: {mode.definitionId}</span>
+          <button className="toolbar-btn" onClick={onEscape}>
+            Cancel (Esc)
+          </button>
+        </div>
+      )}
+
+      {mode.type === "draw" && (
+        <div className="toolbar-group">
+          <span className="toolbar-mode-label">Drawing {mode.axis === "vertical" ? "upright" : "flat"} (1×1×N)</span>
           <button className="toolbar-btn" onClick={onEscape}>
             Cancel (Esc)
           </button>

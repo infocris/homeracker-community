@@ -108,7 +108,7 @@ export const PART_CATALOG: PartDefinition[] = [
   ),
 ];
 
-/** Look up a part definition by ID (checks built-in catalog, then custom parts) */
+/** Look up a part definition by ID (catalog, then custom parts) */
 export function getPartDefinition(id: string): PartDefinition | undefined {
   return PART_CATALOG.find((p) => p.id === id) ?? getCustomPartDefinition(id);
 }

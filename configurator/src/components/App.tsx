@@ -1,12 +1,35 @@
-import { useState, useCallback, useEffect, useSyncExternalStore } from "react";
+import { useState, useCallback, useEffect, useRef, useSyncExternalStore, useMemo } from "react";
 import { ViewportCanvas } from "./ViewportCanvas";
 import { Sidebar } from "./Sidebar";
 import { Toolbar } from "./Toolbar";
 import { BOMPanel } from "./BOMPanel";
 import { AssemblyState } from "../assembly/AssemblyState";
 import { HistoryManager, type Command } from "../assembly/HistoryManager";
-import type { InteractionMode, GridPosition, PlacedPart, Axis, Rotation3, RotationStep, ClipboardData } from "../types";
+import type {
+  InteractionMode,
+  GridPosition,
+  PlacedPart,
+  Axis,
+  Rotation3,
+  RotationStep,
+  ClipboardData,
+  DrawAxis,
+} from "../types";
 import { getPartDefinition } from "../data/catalog";
+import {
+  bestPartForSize,
+  clampToSupportLength,
+  orientationForSize,
+  placedPartBounds,
+  IDENTITY_ROTATION,
+} from "../assembly/part-sizing";
+import { resolveDraw } from "../assembly/draw";
+import {
+  type AttachmentPoint,
+  attachmentPointsOf,
+  compatiblePartsAt,
+  nearestAttachmentPoint,
+} from "../assembly/compatibility";
 import {
   findBestSnap,
   findSnapPoints,
@@ -14,8 +37,15 @@ import {
   findConnectorSnapPoints,
   computeAutoRotation,
 } from "../assembly/snap";
-import { computeGroundLift, nextOrientation } from "../assembly/grid-utils";
+import { computeGroundLift, nextOrientation, clampToWorkspace, rotateGridCells } from "../assembly/grid-utils";
 import { detectCollidingPartIds, detectCollidingPartIdsMesh } from "../assembly/collision";
+import {
+  placementCollides,
+  placementFloor,
+  placementIsGrounded,
+  restOnCollision,
+  settleWithGravity,
+} from "../assembly/gravity";
 import {
   restoreCustomParts,
   importModelFile,
@@ -24,6 +54,12 @@ import {
   restoreEmbeddedCustomParts,
 } from "../data/custom-parts";
 import { encodeAssemblyToHash, decodeAssemblyFromHash, hasCustomParts } from "../sharing/url-sharing";
+
+/** True for an element that owns its own copy/paste/undo behaviour. */
+function isTextEntry(target: EventTarget | null): boolean {
+  const tag = (target as HTMLElement | null)?.tagName;
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT";
+}
 
 // Global singleton instances
 const assembly = new AssemblyState();
@@ -78,6 +114,16 @@ assembly.subscribe(() => {
 (window as any).__collision = {
   detectCollidingPartIds,
   detectCollidingPartIdsMesh,
+};
+(window as any).__placedPartBounds = placedPartBounds;
+(window as any).__resolveDraw = resolveDraw;
+(window as any).__compat = { attachmentPointsOf, nearestAttachmentPoint, compatiblePartsAt };
+(window as any).__gravity = {
+  placementCollides,
+  placementFloor,
+  placementIsGrounded,
+  restOnCollision,
+  settleWithGravity,
 };
 
 export function App() {
@@ -331,6 +377,16 @@ export function App() {
       }
       if (partsToNudge.length === 0) return;
 
+      // The selection moves as a block: if the nudge would push any part out of the
+      // buildable area, the whole group stops at the wall rather than deforming.
+      for (const p of partsToNudge) {
+        const def = getPartDefinition(p.def);
+        if (!def) continue;
+        const next: GridPosition = [p.oldPos[0] + dx, p.oldPos[1] + dy, p.oldPos[2] + dz];
+        const bounded = clampToWorkspace(rotateGridCells(def.gridCells, p.rot), next, p.orient);
+        if (bounded[0] !== next[0] || bounded[1] !== next[1] || bounded[2] !== next[2]) return;
+      }
+
       const cmd: Command = {
         description: `Nudge ${partsToNudge.length} part(s)`,
         execute() {
@@ -527,24 +583,58 @@ export function App() {
     setSelectedPartIds(newIds);
   }, [selectedPartIds]);
 
+  /** Spot picked by re-clicking an already-selected part */
+  const [selectedPoint, setSelectedPoint] = useState<AttachmentPoint | null>(null);
+  // On by default: picking a spot is a deliberate act, so narrowing the catalog to
+  // what fits there is the useful outcome. Unticking widens it back.
+  const [filterByPosition, setFilterByPosition] = useState(true);
+
   const handleClickPart = useCallback(
-    (instanceId: string, shiftKey: boolean) => {
-      if (mode.type === "select") {
-        setSelectedPartIds((prev) => {
-          if (shiftKey) {
-            const next = new Set(prev);
-            if (next.has(instanceId)) next.delete(instanceId);
-            else next.add(instanceId);
-            return next;
-          }
-          // Toggle single selection
-          if (prev.size === 1 && prev.has(instanceId)) return new Set();
-          return new Set([instanceId]);
-        });
+    (instanceId: string, shiftKey: boolean, gridPoint?: GridPosition) => {
+      if (mode.type !== "select") return;
+
+      // Clicking the part that is already the whole selection picks a spot on it
+      // rather than deselecting, so the same gesture drills down one level.
+      const alreadySoleSelection = !shiftKey && selectedPartIds.size === 1 && selectedPartIds.has(instanceId);
+      if (alreadySoleSelection && gridPoint) {
+        const part = assembly.getPartById(instanceId);
+        const next = part ? nearestAttachmentPoint(part, gridPoint) : null;
+        // Re-clicking the spot already picked clears it, then a further click deselects
+        setSelectedPoint((prev) =>
+          prev && next && prev.direction === next.direction && prev.cell.join() === next.cell.join() ? null : next,
+        );
+        if (next) return;
       }
+
+      setSelectedPoint(null);
+      setSelectedPartIds((prev) => {
+        if (shiftKey) {
+          const next = new Set(prev);
+          if (next.has(instanceId)) next.delete(instanceId);
+          else next.add(instanceId);
+          return next;
+        }
+        // Toggle single selection
+        if (prev.size === 1 && prev.has(instanceId)) return new Set();
+        return new Set([instanceId]);
+      });
     },
-    [mode],
+    [mode, selectedPartIds],
   );
+
+  // A spot only means something while its part is the selection
+  const activePoint = useMemo(() => {
+    if (!selectedPoint || selectedPartIds.size !== 1) return null;
+    return selectedPoint;
+  }, [selectedPoint, selectedPartIds]);
+
+  const compatibleDefinitionIds = useMemo(() => {
+    if (!activePoint || !filterByPosition || selectedPartIds.size !== 1) return null;
+    const part = assembly.getPartById([...selectedPartIds][0]);
+    if (!part) return null;
+    return new Set(compatiblePartsAt(assembly, part, activePoint).map((d) => d.id));
+    // snapshot.parts is in the deps because occupancy decides what still fits
+  }, [activePoint, filterByPosition, selectedPartIds, snapshot.parts]);
 
   const handleClickEmpty = useCallback(() => {
     setSelectedPartIds(new Set());
@@ -563,6 +653,103 @@ export function App() {
     setSelectedPartIds(new Set());
   }, []);
 
+  const handleDrawMode = useCallback((axis: DrawAxis) => {
+    // Clicking the active axis leaves draw mode; the other axis switches to it
+    setMode((prev) => (prev.type === "draw" && prev.axis === axis ? { type: "select" } : { type: "draw", axis }));
+    setSelectedPartIds(new Set());
+  }, []);
+
+  const handleDraw = useCallback((anchor: GridPosition, size: [number, number, number]) => {
+    // Same resolution the ghost used, so the part lands where the preview showed it
+    const drawn = resolveDraw(assembly, anchor, size, assembly.gravityEnabled);
+    if (!drawn) return;
+    const { definitionId, orientation, position } = drawn;
+
+    const cmd: Command = {
+      description: `Draw ${definitionId}`,
+      execute() {
+        assembly.addPart(definitionId, position, IDENTITY_ROTATION, orientation);
+      },
+      undo() {
+        const parts = assembly.getAllParts();
+        const match = parts.find(
+          (p) =>
+            p.definitionId === definitionId &&
+            p.position[0] === position[0] &&
+            p.position[1] === position[1] &&
+            p.position[2] === position[2],
+        );
+        if (match) assembly.removePart(match.instanceId);
+      },
+    };
+    history.execute(cmd);
+    const match = assembly
+      .getAllParts()
+      .find(
+        (p) =>
+          p.definitionId === definitionId &&
+          p.position[0] === position[0] &&
+          p.position[1] === position[1] &&
+          p.position[2] === position[2],
+      );
+    if (match) setSelectedPartIds(new Set([match.instanceId]));
+  }, []);
+
+  const handleResizePart = useCallback((instanceId: string, position: GridPosition, size: [number, number, number]) => {
+    const part = assembly.getPartById(instanceId);
+    if (!part) return;
+    const before: PlacedPart = { ...part, position: [...part.position] };
+
+    // A support follows its box: it becomes the support of the new length. Dragging
+    // past the longest one the catalog has stops there rather than breaking the part.
+    if (getPartDefinition(before.definitionId)?.category !== "support") return;
+    const capped = clampToSupportLength(size);
+    const target = bestPartForSize(capped, "support");
+    if (!target) return;
+
+    const newDefId = target.id;
+    const newOrientation = orientationForSize(target, capped);
+
+    if (
+      before.definitionId === newDefId &&
+      before.position[0] === position[0] &&
+      before.position[1] === position[1] &&
+      before.position[2] === position[2]
+    ) {
+      return;
+    }
+
+    const cmd: Command = {
+      description: `Resize ${newDefId}`,
+      execute() {
+        assembly.removePart(instanceId);
+        const newId = assembly.addPart(newDefId, position, IDENTITY_ROTATION, newOrientation, before.color);
+        if (newId) setSelectedPartIds(new Set([newId]));
+      },
+      undo() {
+        const current = assembly
+          .getAllParts()
+          .find(
+            (p) =>
+              p.definitionId === newDefId &&
+              p.position[0] === position[0] &&
+              p.position[1] === position[1] &&
+              p.position[2] === position[2],
+          );
+        if (current) assembly.removePart(current.instanceId);
+        const restored = assembly.addPart(
+          before.definitionId,
+          before.position,
+          before.rotation,
+          before.orientation,
+          before.color,
+        );
+        if (restored) setSelectedPartIds(new Set([restored]));
+      },
+    };
+    history.execute(cmd);
+  }, []);
+
   const handleUndo = useCallback(() => {
     history.undo();
     setSelectedPartIds(new Set());
@@ -571,6 +758,11 @@ export function App() {
     history.redo();
     setSelectedPartIds(new Set());
   }, []);
+
+  // The system clipboard is best-effort: browsers gate reads behind a permission
+  // that Firefox and Safari never grant to a page. This in-app buffer is what makes
+  // copy → paste work every time; the system clipboard only adds cross-tab pasting.
+  const clipboardRef = useRef<ClipboardData | null>(null);
 
   const handleCopy = useCallback(() => {
     if (selectedPartIds.size === 0) return;
@@ -593,26 +785,40 @@ export function App() {
         color: p.color,
       })),
     };
+    clipboardRef.current = clipboard;
     navigator.clipboard.writeText(JSON.stringify({ homeracker: "clipboard", ...clipboard })).catch(() => {});
     setToast(`Copied ${parts.length} part(s)`);
     setTimeout(() => setToast(null), 2000);
   }, [selectedPartIds]);
 
-  const handlePaste = useCallback(async () => {
+  /** Parse pasted text, or null when it is not a HomeRacker payload. */
+  const parseClipboardText = (text: string | null | undefined): ClipboardData | null => {
+    if (!text) return null;
     try {
-      const text = await navigator.clipboard.readText();
       const data = JSON.parse(text);
-      if (data?.homeracker !== "clipboard" || !Array.isArray(data.parts)) return;
-      const clipboard: ClipboardData = { parts: data.parts };
-      setMode({ type: "paste", clipboard });
-      setSelectedPartIds(new Set());
+      if (data?.homeracker !== "clipboard" || !Array.isArray(data.parts) || data.parts.length === 0) return null;
+      return { parts: data.parts };
     } catch {
-      // Not valid clipboard data — ignore
+      return null;
     }
+  };
+
+  const handlePaste = useCallback((text?: string | null) => {
+    const clipboard = parseClipboardText(text) ?? clipboardRef.current;
+    if (!clipboard || clipboard.parts.length === 0) {
+      setToast("Nothing to paste — copy a selection first (Ctrl/Cmd+C)");
+      setTimeout(() => setToast(null), 2500);
+      return;
+    }
+    setMode({ type: "paste", clipboard });
+    setSelectedPartIds(new Set());
   }, []);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      // Leave text fields alone — Ctrl+C/V/Z there belong to the field
+      if (isTextEntry(e.target)) return;
+
       if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) {
         e.preventDefault();
         handleUndo();
@@ -623,12 +829,29 @@ export function App() {
         e.preventDefault();
         handleCopy();
       } else if ((e.ctrlKey || e.metaKey) && e.key === "v") {
-        e.preventDefault();
+        // No preventDefault: that would suppress the `paste` event below, which is
+        // the only way to read the system clipboard without a permission prompt.
         handlePaste();
       }
     };
+
+    // Fires right after the Ctrl+V keydown. Parts copied in another tab arrive here;
+    // anything else leaves the in-app buffer that keydown already pasted in place.
+    const handleClipboardPaste = (e: ClipboardEvent) => {
+      if (isTextEntry(e.target)) return;
+      const fromSystem = e.clipboardData?.getData("text/plain");
+      if (parseClipboardText(fromSystem)) {
+        e.preventDefault();
+        handlePaste(fromSystem);
+      }
+    };
+
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
+    document.addEventListener("paste", handleClipboardPaste);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("paste", handleClipboardPaste);
+    };
   }, [handleUndo, handleRedo, handleCopy, handlePaste]);
 
   const handleClear = useCallback(() => {
@@ -689,6 +912,10 @@ export function App() {
     };
     input.click();
   }, [handleSetInventory]);
+
+  const handleToggleGravity = useCallback(() => {
+    assembly.setGravityEnabled(!assembly.gravityEnabled);
+  }, []);
 
   const handleToggleSnap = useCallback(() => {
     assembly.setSnapEnabled(!assembly.snapEnabled);
@@ -827,6 +1054,11 @@ export function App() {
         onSelectPart={handleSelectPart}
         activeMode={mode}
         usedDefinitionIds={new Set(snapshot.parts.map((p) => p.definitionId))}
+        hasSelectedPoint={!!activePoint}
+        filterByPosition={filterByPosition}
+        onToggleFilterByPosition={() => setFilterByPosition((v) => !v)}
+        compatibleDefinitionIds={compatibleDefinitionIds}
+        onDrawMode={handleDrawMode}
       />
       <div className="main-area">
         <Toolbar
@@ -842,6 +1074,8 @@ export function App() {
           mode={mode}
           snapEnabled={snapshot.snapEnabled}
           onToggleSnap={handleToggleSnap}
+          gravityEnabled={snapshot.gravityEnabled}
+          onToggleGravity={handleToggleGravity}
           showCollisions={snapshot.showCollisions}
           onToggleCollisions={handleToggleCollisions}
           fineMeshCollisions={snapshot.fineMeshCollisions}
@@ -853,9 +1087,12 @@ export function App() {
           selectedPartIds={selectedPartIds}
           assembly={assembly}
           onPlacePart={handlePlacePart}
+          onDraw={handleDraw}
+          onResizePart={handleResizePart}
           onMovePart={handleMovePart}
           onMoveSelectedParts={handleMoveSelectedParts}
           onClickPart={handleClickPart}
+          selectedPoint={activePoint}
           onClickEmpty={handleClickEmpty}
           onBoxSelect={handleBoxSelect}
           onNudgeParts={handleNudgeParts}
@@ -867,20 +1104,23 @@ export function App() {
           flashPartId={flashPartId}
           flashDefinitionId={flashDefinitionId}
           snapEnabled={snapshot.snapEnabled}
+          gravityEnabled={snapshot.gravityEnabled}
           showCollisions={snapshot.showCollisions}
           fineMeshCollisions={snapshot.fineMeshCollisions}
         />
       </div>
-      <BOMPanel
-        entries={bom}
-        selectedPartIds={selectedPartIds}
-        parts={snapshot.parts}
-        onFlashPart={handleFlashPart}
-        onFlashDefinition={handleFlashDefinition}
-        onSetColor={handleSetColor}
-        inventory={inventory}
-        onSetInventory={handleSetInventory}
-      />
+      <div className="right-panel">
+        <BOMPanel
+          entries={bom}
+          selectedPartIds={selectedPartIds}
+          parts={snapshot.parts}
+          onFlashPart={handleFlashPart}
+          onFlashDefinition={handleFlashDefinition}
+          onSetColor={handleSetColor}
+          inventory={inventory}
+          onSetInventory={handleSetInventory}
+        />
+      </div>
       {toast && <div className="toast">{toast}</div>}
     </div>
   );

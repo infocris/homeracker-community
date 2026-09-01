@@ -1,4 +1,4 @@
-import type { GridPosition, Axis, Rotation3 } from "../types";
+import type { GridPosition, Axis, PartCategory, Rotation3 } from "../types";
 import type { AssemblyState } from "./AssemblyState";
 import { getPartDefinition } from "../data/catalog";
 import { rotateAxis } from "./grid-utils";
@@ -64,54 +64,51 @@ export function detectCollidingPartIds(assembly: AssemblyState): Set<string> {
 
 export { detectCollidingPartIds as detectCollidingPartIdsMesh } from "./mesh-collision";
 
+/** What one part contributes to a shared cell, for the pull-through exemption. */
+export interface CellParticipant {
+  category: PartCategory;
+  /** Pull-through axis after rotation — pull-through connectors only */
+  ptAxis?: Axis;
+  /** Beam axis — supports only */
+  orientation?: Axis;
+}
+
+/** Describe a part (placed or merely proposed) as a cell participant. */
+export function cellParticipant(
+  def: { category: PartCategory; pullThroughAxis?: Axis },
+  rotation: Rotation3 = [0, 0, 0],
+  orientation?: Axis,
+): CellParticipant {
+  return {
+    category: def.category,
+    ptAxis: def.pullThroughAxis ? rotateAxis(def.pullThroughAxis, rotation) : undefined,
+    orientation: orientation ?? "y",
+  };
+}
+
 /**
- * A cell is a valid pull-through overlap if it contains exactly one
- * pull-through connector and one or more supports, and the connector's
- * effective PT axis matches each support's orientation.
+ * A cell shared by several parts is legal only as a pull-through overlap: exactly
+ * one pull-through connector, at least one support, nothing else, and every
+ * support running along the connector's effective PT axis.
  */
+export function isValidPullThroughOverlap(participants: CellParticipant[]): boolean {
+  const ptConnectors = participants.filter((p) => p.category === "connector" && p.ptAxis);
+  const supports = participants.filter((p) => p.category === "support");
+  if (ptConnectors.length !== 1 || supports.length === 0) return false;
+  // Anything that is neither the PT connector nor a support makes the overlap illegal
+  if (ptConnectors.length + supports.length !== participants.length) return false;
+  const ptAxis = ptConnectors[0].ptAxis;
+  return supports.every((s) => (s.orientation ?? "y") === ptAxis);
+}
+
 function isValidPullThroughCell(ids: string[], assembly: AssemblyState): boolean {
-  let ptConnectorCount = 0;
-  let ptAxis: Axis | null = null;
-  let supportCount = 0;
-  let otherCount = 0;
-
+  const participants: CellParticipant[] = [];
   for (const id of ids) {
     const part = assembly.getPartById(id);
-    if (!part) {
-      otherCount++;
-      continue;
-    }
-    const def = getPartDefinition(part.definitionId);
-    if (!def) {
-      otherCount++;
-      continue;
-    }
-
-    if (def.category === "connector" && def.pullThroughAxis) {
-      ptConnectorCount++;
-      const rotation: Rotation3 = part.rotation ?? [0, 0, 0];
-      ptAxis = rotateAxis(def.pullThroughAxis, rotation);
-    } else if (def.category === "support") {
-      supportCount++;
-      const supportOrientation: Axis = part.orientation ?? "y";
-      // We'll verify axis match below
-      if (ptAxis !== null && supportOrientation !== ptAxis) return false;
-    } else {
-      otherCount++;
-    }
+    const def = part ? getPartDefinition(part.definitionId) : undefined;
+    // An occupant we cannot identify is never a legal overlap
+    if (!part || !def) return false;
+    participants.push(cellParticipant(def, part.rotation, part.orientation));
   }
-
-  if (otherCount > 0 || ptConnectorCount !== 1 || supportCount === 0) return false;
-
-  // Re-verify all supports match the PT axis (in case ptAxis was set after a support was checked)
-  for (const id of ids) {
-    const part = assembly.getPartById(id);
-    if (!part) continue;
-    const def = getPartDefinition(part.definitionId);
-    if (!def || def.category !== "support") continue;
-    const supportOrientation: Axis = part.orientation ?? "y";
-    if (supportOrientation !== ptAxis) return false;
-  }
-
-  return true;
+  return isValidPullThroughOverlap(participants);
 }

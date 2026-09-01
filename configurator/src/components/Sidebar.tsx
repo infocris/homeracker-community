@@ -11,12 +11,19 @@ import {
   replaceCustomPart,
 } from "../data/custom-parts";
 import { useThumbnail } from "../thumbnails/useThumbnail";
-import type { InteractionMode, PartCategory, PartDefinition } from "../types";
+import type { DrawAxis, InteractionMode, PartCategory, PartDefinition } from "../types";
 
 interface SidebarProps {
   onSelectPart: (definitionId: string) => void;
   activeMode: InteractionMode;
   usedDefinitionIds: Set<string>;
+  /** A spot on the selected part has been picked, so filtering by it is available */
+  hasSelectedPoint: boolean;
+  filterByPosition: boolean;
+  onToggleFilterByPosition: () => void;
+  /** Parts that fit the picked spot, or null when the filter is off */
+  compatibleDefinitionIds: Set<string> | null;
+  onDrawMode: (axis: DrawAxis) => void;
 }
 
 const SECTIONS: {
@@ -91,7 +98,16 @@ function PartButton({ part, isActive, onSelect }: { part: PartDefinition; isActi
   );
 }
 
-export function Sidebar({ onSelectPart, activeMode, usedDefinitionIds }: SidebarProps) {
+export function Sidebar({
+  onSelectPart,
+  activeMode,
+  usedDefinitionIds,
+  hasSelectedPoint,
+  filterByPosition,
+  onToggleFilterByPosition,
+  compatibleDefinitionIds,
+  onDrawMode,
+}: SidebarProps) {
   const activePlaceId = activeMode.type === "place" ? activeMode.definitionId : null;
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -139,8 +155,16 @@ export function Sidebar({ onSelectPart, activeMode, usedDefinitionIds }: Sidebar
   const query = searchQuery.toLowerCase().trim();
   const isSearching = query.length > 0;
 
-  const filterParts = (parts: PartDefinition[]) =>
-    isSearching ? parts.filter((p) => p.name.toLowerCase().includes(query)) : parts;
+  const filterParts = (parts: PartDefinition[]) => {
+    let out = parts;
+    if (compatibleDefinitionIds) out = out.filter((p) => compatibleDefinitionIds.has(p.id));
+    if (isSearching) out = out.filter((p) => p.name.toLowerCase().includes(query));
+    return out;
+  };
+
+  // A collapsed section would hide the very part a filter is surfacing
+  const forceExpanded = isSearching || !!compatibleDefinitionIds;
+
   return (
     <div className="sidebar">
       <div className="sidebar-header">
@@ -172,6 +196,25 @@ export function Sidebar({ onSelectPart, activeMode, usedDefinitionIds }: Sidebar
         </div>
       </div>
 
+      <div className="sidebar-draw-group">
+        <button
+          type="button"
+          className={`toolbar-btn${activeMode.type === "draw" && activeMode.axis === "horizontal" ? " toolbar-btn-active" : ""}`}
+          onClick={() => onDrawMode("horizontal")}
+          title="Drag across the ground to lay down a support of that length"
+        >
+          Draw ▬
+        </button>
+        <button
+          type="button"
+          className={`toolbar-btn${activeMode.type === "draw" && activeMode.axis === "vertical" ? " toolbar-btn-active" : ""}`}
+          onClick={() => onDrawMode("vertical")}
+          title="Click a cell and drag upward to stand a support of that height"
+        >
+          Draw ▮
+        </button>
+      </div>
+
       <div className="sidebar-search-container">
         <input
           className="sidebar-search"
@@ -185,11 +228,22 @@ export function Sidebar({ onSelectPart, activeMode, usedDefinitionIds }: Sidebar
         />
       </div>
 
+      {hasSelectedPoint && (
+        <label className="sidebar-position-filter">
+          <input type="checkbox" checked={filterByPosition} onChange={onToggleFilterByPosition} />
+          <span>Only parts that fit the picked spot</span>
+        </label>
+      )}
+
+      {compatibleDefinitionIds?.size === 0 && (
+        <p className="sidebar-position-filter-empty">No catalog part can attach at that spot.</p>
+      )}
+
       {SECTIONS.map(({ key, label, filter }) => {
         const parts = filterParts(PART_CATALOG.filter(filter));
         if (parts.length === 0) return null;
 
-        const isCollapsed = !isSearching && collapsed.has(key);
+        const isCollapsed = !forceExpanded && collapsed.has(key);
 
         return (
           <div key={key} className="catalog-section">
@@ -219,7 +273,7 @@ export function Sidebar({ onSelectPart, activeMode, usedDefinitionIds }: Sidebar
         const otherParts = filterParts(PART_CATALOG.filter((p) => p.category === "other"));
         if (otherParts.length === 0) return null;
 
-        const isOtherCollapsed = !isSearching && collapsed.has("other");
+        const isOtherCollapsed = !forceExpanded && collapsed.has("other");
 
         // Group parts by their group field; ungrouped parts go into a flat list
         const groups: Map<string, PartDefinition[]> = new Map();
@@ -257,7 +311,7 @@ export function Sidebar({ onSelectPart, activeMode, usedDefinitionIds }: Sidebar
                 )}
                 {[...groups.entries()].map(([groupName, parts]) => {
                   const groupKey = `other-group-${groupName}`;
-                  const isGroupCollapsed = !isSearching && collapsed.has(groupKey);
+                  const isGroupCollapsed = !forceExpanded && collapsed.has(groupKey);
                   return (
                     <div key={groupKey} className="catalog-subgroup">
                       <h3 className="catalog-subgroup-title" onClick={() => toggleCategory(groupKey)}>
@@ -289,8 +343,8 @@ export function Sidebar({ onSelectPart, activeMode, usedDefinitionIds }: Sidebar
       {/* Custom / Imported section */}
       {(() => {
         const customParts = filterParts(customSnapshot.definitions);
-        const isCustomCollapsed = !isSearching && collapsed.has("custom");
-        if (isSearching && customParts.length === 0) return null;
+        const isCustomCollapsed = !forceExpanded && collapsed.has("custom");
+        if (forceExpanded && customParts.length === 0) return null;
 
         return (
           <div className="catalog-section">

@@ -11,7 +11,7 @@ function gridKey(pos: GridPosition): string {
  * A fractional cell like 14.7 covers [14.7, 15.7), overlapping integer
  * cells 14 and 15. Register in all integer cells it touches.
  */
-function gridKeysForCell(pos: GridPosition): string[] {
+export function gridKeysForCell(pos: GridPosition): string[] {
   const xVals = [Math.floor(pos[0])];
   const yVals = [Math.floor(pos[1])];
   const zVals = [Math.floor(pos[2])];
@@ -39,6 +39,7 @@ export interface AssemblySnapshot {
   snapEnabled: boolean;
   showCollisions: boolean;
   fineMeshCollisions: boolean;
+  gravityEnabled: boolean;
 }
 
 const SETTINGS_KEY = "homeracker-settings";
@@ -53,6 +54,7 @@ export class AssemblyState {
     snapEnabled: true,
     showCollisions: false,
     fineMeshCollisions: false,
+    gravityEnabled: true,
   };
 
   /** When true, parts snap to nearby connection points during placement/drag */
@@ -61,6 +63,8 @@ export class AssemblyState {
   showCollisions: boolean = false;
   /** When true, use BVH mesh intersection for precise collision detection */
   fineMeshCollisions: boolean = true;
+  /** When true, moved and placed parts rest on what is below them instead of floating */
+  gravityEnabled: boolean = true;
 
   constructor() {
     try {
@@ -70,6 +74,7 @@ export class AssemblyState {
         if (settings.snapEnabled !== undefined) this.snapEnabled = !!settings.snapEnabled;
         if (settings.showCollisions !== undefined) this.showCollisions = !!settings.showCollisions;
         if (settings.fineMeshCollisions !== undefined) this.fineMeshCollisions = !!settings.fineMeshCollisions;
+        if (settings.gravityEnabled !== undefined) this.gravityEnabled = !!settings.gravityEnabled;
       }
     } catch {
       /* ignore */
@@ -84,6 +89,7 @@ export class AssemblyState {
           snapEnabled: this.snapEnabled,
           showCollisions: this.showCollisions,
           fineMeshCollisions: this.fineMeshCollisions,
+          gravityEnabled: this.gravityEnabled,
         }),
       );
     } catch {
@@ -109,6 +115,12 @@ export class AssemblyState {
     this.notify();
   }
 
+  setGravityEnabled(value: boolean) {
+    this.gravityEnabled = value;
+    this.persistSettings();
+    this.notify();
+  }
+
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
@@ -120,6 +132,7 @@ export class AssemblyState {
       snapEnabled: this.snapEnabled,
       showCollisions: this.showCollisions,
       fineMeshCollisions: this.fineMeshCollisions,
+      gravityEnabled: this.gravityEnabled,
     };
     for (const listener of this.listeners) {
       listener();
