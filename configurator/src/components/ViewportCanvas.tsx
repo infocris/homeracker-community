@@ -9,9 +9,18 @@ import {
   Html,
   useGLTF,
 } from "@react-three/drei";
-import { useCallback, useRef, useState, useEffect, useMemo, Suspense, useLayoutEffect } from "react";
+import {
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import * as THREE from "three";
-import { BASE_UNIT, PART_COLORS, GRID_EXTENT, WORKSPACE_EXTENT } from "../constants";
+import { BASE_UNIT, PART_COLORS, GRID_EXTENT } from "../constants";
 import type {
   PlacedPart,
   InteractionMode,
@@ -64,6 +73,14 @@ import {
   targetCellOf,
 } from "../assembly/compatibility";
 import { settleWithGravity, restOnCollision, placementIsGrounded } from "../assembly/gravity";
+import {
+  WORKSPACE_LIMITS,
+  getWorkspace,
+  setWorkspace,
+  subscribeWorkspace,
+  type WorkspaceSize,
+} from "../assembly/workspace";
+import { WorkspaceSettings } from "./WorkspaceSettings";
 
 /** Pointer travel (px) above which a press counts as a drag rather than a click */
 const DRAG_THRESHOLD = 5;
@@ -168,10 +185,14 @@ export function computeDrawSpan(
 
 const CAMERA_MODE_STORAGE_KEY = "homeracker-camera-orthographic";
 const CONNECTORS_STORAGE_KEY = "homeracker-show-connectors";
+const ROTATION_GUIDES_STORAGE_KEY = "homeracker-rotation-guides";
 const MIRROR_STORAGE_KEY = "homeracker-mirror-minimap";
 
 /** Half-width the shadow camera and the shadow catcher have to span */
-const SHADOW_EXTENT = WORKSPACE_EXTENT * BASE_UNIT + BASE_UNIT;
+/** How far the shadow camera and the floor reach, for a buildable area of this size */
+function shadowExtentFor(extent: number) {
+  return extent * BASE_UNIT + BASE_UNIT;
+}
 
 /**
  * Inset geometry, in fractions of the viewport. Fractions rather than pixels so the
@@ -573,6 +594,31 @@ function rotationAxesFromCamera(camera: THREE.Camera): { x: 0 | 1 | 2; y: 0 | 1 
   return { x: 1, y: intoScreen as 0 | 2, z: (intoScreen === 0 ? 2 : 0) as 0 | 2 };
 }
 
+/**
+ * Whether the app's own quarter turn about this axis reads as clockwise from where the
+ * camera stands.
+ *
+ * Measured rather than derived from a handedness rule: the turn is applied through
+ * rotateGridCells and the two points are projected, so the answer holds whatever
+ * convention that function follows. The sign of the screen-space cross product between
+ * the arm and the way its tip moves is the whole test — negative is clockwise, with
+ * normalised device coordinates counting y upward.
+ */
+function quarterTurnIsClockwise(camera: THREE.Camera, centre: [number, number, number], axis: 0 | 1 | 2): boolean {
+  const probe = KEY_BADGE_LATTICE[axis];
+  const turned = rotateGridCells([probe], AXIS_QUARTER_TURN[axis])[0];
+  const at = (v: GridPosition) =>
+    new THREE.Vector3(centre[0] + v[0] * BASE_UNIT, centre[1] + v[1] * BASE_UNIT, centre[2] + v[2] * BASE_UNIT).project(
+      camera,
+    );
+  const middle = new THREE.Vector3(centre[0], centre[1], centre[2]).project(camera);
+  const from = at(probe);
+  const to = at(turned);
+  const arm = { x: from.x - middle.x, y: from.y - middle.y };
+  const move = { x: to.x - from.x, y: to.y - from.y };
+  return arm.x * move.y - arm.y * move.x < 0;
+}
+
 /** The key that drives the ring turning about this axis, for the camera as it stands. */
 function keyForAxis(camera: THREE.Camera, axis: 0 | 1 | 2): "X" | "Y" | "Z" {
   const axes = rotationAxesFromCamera(camera);
@@ -809,6 +855,52 @@ function RotationHandles({
   );
 }
 
+/**
+ * The working level, drawn only when it is off the ground.
+ *
+ * Out of the depth buffer and out of raycasting, like the floor: it is a place to
+ * build on, not something to collide with or click.
+ */
+function WorkingLevel({ level, extent, opacity }: { level: number; extent: number; opacity: number }) {
+  /* One line per cell across the buildable area, so the level can be read like the
+     ground is — a bounded grid rather than a second endless one, which would have to
+     fight the ground's for the depth buffer. */
+  const lines = useMemo(() => {
+    const half = extent * BASE_UNIT + BASE_UNIT / 2;
+    const points: number[] = [];
+    for (let i = -extent; i <= extent + 1; i++) {
+      const at = i * BASE_UNIT - BASE_UNIT / 2;
+      points.push(at, 0, -half, at, 0, half);
+      points.push(-half, 0, at, half, 0, at);
+    }
+    return new Float32Array(points);
+  }, [extent]);
+
+  if (level <= 0) return null;
+  const side = (extent * 2 + 1) * BASE_UNIT;
+  const y = level * BASE_UNIT;
+  return (
+    <group position={[0, y, 0]}>
+      <mesh rotation={[-Math.PI / 2, 0, 0]} raycast={() => null} renderOrder={-1}>
+        <planeGeometry args={[side, side]} />
+        <meshBasicMaterial color={PART_COLORS.selected} transparent opacity={opacity} depthWrite={false} />
+      </mesh>
+      <lineSegments raycast={() => null} renderOrder={-1}>
+        <bufferGeometry>
+          <bufferAttribute attach="attributes-position" args={[lines, 3]} />
+        </bufferGeometry>
+        {/* The lines stay readable when the surface is faint, and never outshine it */}
+        <lineBasicMaterial
+          color={PART_COLORS.selected}
+          transparent
+          opacity={Math.min(0.9, 0.25 + opacity)}
+          depthWrite={false}
+        />
+      </lineSegments>
+    </group>
+  );
+}
+
 /** Marks the spot a re-click picked on the selected part, and where a part would go */
 function AttachmentMarker({ point }: { point: AttachmentPoint }) {
   const worldPos = gridToWorld(targetCellOf(point));
@@ -939,11 +1031,11 @@ function HeightGuides({ min, size }: { min: GridPosition; size: [number, number,
 }
 
 /** Outline of the buildable area, so its edge is visible rather than a mystery wall */
-function WorkspaceBounds() {
+function WorkspaceBounds({ extent }: { extent: number }) {
   const points = useMemo(() => {
-    const e = WORKSPACE_EXTENT * BASE_UNIT + BASE_UNIT / 2;
+    const e = extent * BASE_UNIT + BASE_UNIT / 2;
     return new Float32Array([-e, 0, -e, e, 0, -e, e, 0, e, -e, 0, e]);
-  }, []);
+  }, [extent]);
   return (
     <lineLoop position={[0, 0.05, 0]}>
       <bufferGeometry>
@@ -959,17 +1051,28 @@ function WorkspaceBounds() {
  * sits on top of whatever is already there, so the cell you are about to anchor on
  * is the cell the part will actually start from.
  */
-function DrawSpanCursor({ assembly, gravityEnabled }: { assembly: AssemblyState; gravityEnabled: boolean }) {
+function DrawSpanCursor({
+  assembly,
+  gravityEnabled,
+  level,
+}: {
+  assembly: AssemblyState;
+  gravityEnabled: boolean;
+  level: number;
+}) {
   const { camera, raycaster, pointer } = useThree();
   const [gridPos, setGridPos] = useState<GridPosition>([0, 0, 0]);
-  const plane = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), []);
+  // Drawing happens on the working level when one is up, so the cursor is picked
+  // against that plane — taking it from the ground would put the cell under the eye
+  // rather than under the pointer
+  const plane = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 1, 0), -level * BASE_UNIT), [level]);
   const intersectPoint = useMemo(() => new THREE.Vector3(), []);
 
   useFrame(() => {
     raycaster.setFromCamera(pointer, camera);
     if (!raycaster.ray.intersectPlane(plane, intersectPoint)) return;
     const grid = clampCellToWorkspace(snapToGrid(intersectPoint));
-    grid[1] = 0;
+    grid[1] = level;
     const settled = resolveDraw(assembly, grid, [1, 1, 1], gravityEnabled)?.position ?? grid;
     setGridPos((prev) => (prev[0] === settled[0] && prev[1] === settled[1] && prev[2] === settled[2] ? prev : settled));
   });
@@ -1703,6 +1806,7 @@ function GhostPreview({
   ghostRotation,
   ghostStateRef,
   autoAim,
+  workingLevel,
   yLift,
   snapEnabled,
   gravityEnabled,
@@ -1715,6 +1819,8 @@ function GhostPreview({
   ghostStateRef: React.MutableRefObject<GhostState>;
   /** False once the part has been turned by hand: the snap stops aiming it */
   autoAim: boolean;
+  /** Height of the working floor, in cells: where the cursor lands while placing */
+  workingLevel: number;
   yLift: number;
   snapEnabled: boolean;
   gravityEnabled: boolean;
@@ -1728,6 +1834,8 @@ function GhostPreview({
     ghostRotation,
     yLift,
     snapEnabled,
+    // The cursor lands on the working level, so what is placed follows the eye
+    planeY: workingLevel * BASE_UNIT,
     gravityIgnoreIds: gravityEnabled ? noParts : undefined,
     syncRef: ghostStateRef,
     autoAim,
@@ -2188,8 +2296,12 @@ interface SceneProps extends ViewportProps {
   fadedPartIds: Set<string>;
   /** Off leaves only the bars, so the shape of a structure can be read on its own */
   showConnectors: boolean;
+  /** Off hides the rotation rings; the keys still turn the selection */
+  showRotationGuides: boolean;
   /** False once the part in hand has been turned by hand: the snap stops aiming it */
   autoAim: boolean;
+  /** The buildable area as it stands, which the bounds outline and the shadows cover */
+  workspace: WorkspaceSize;
   /** The connectors this drop would change, previewed until the drag ends */
   adaptations: ConnectorAdaptation[];
   onAdaptation: (adaptations: ConnectorAdaptation[]) => void;
@@ -2240,7 +2352,9 @@ function Scene({
   selectionBody,
   fadedPartIds,
   showConnectors,
+  showRotationGuides,
   autoAim,
+  workspace,
   adaptations,
   onAdaptation,
   adaptiveEnabled,
@@ -2255,6 +2369,25 @@ function Scene({
     }
     return null;
   }, []);
+
+  /**
+   * The cell under the pointer on the working level.
+   *
+   * The invisible pick plane lies on the ground, so its hit is the right cell only
+   * while the level is the ground. Higher up, the ray has to be met at that height or
+   * the drawn span lands where the ground is seen through the pointer, a cell or more
+   * away from where it looks.
+   */
+  const gridOnWorkingPlane = useCallback(
+    (e: { ray?: THREE.Ray; point?: THREE.Vector3 }, level: number): GridPosition | null => {
+      if (level <= 0 || !e.ray) return e.point ? snapToGrid(e.point) : null;
+      const plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -level * BASE_UNIT);
+      const hit = new THREE.Vector3();
+      if (!e.ray.intersectPlane(plane, hit)) return null;
+      return snapToGrid(hit);
+    },
+    [],
+  );
 
   const handleGroundClick = useCallback(
     (e: any) => {
@@ -2298,28 +2431,28 @@ function Scene({
       if (mode.type !== "draw") return;
       if (e.button !== 0) return; // right button cancels, middle pans — neither draws
       e.stopPropagation();
-      const grid = gridFromPointerEvent(e);
+      const grid = gridOnWorkingPlane(e, workspace.level);
       if (!grid) return;
-      grid[1] = 0;
+      grid[1] = workspace.level;
       const anchor = clampCellToWorkspace(grid);
       // Anchor where the part will actually rest, so an upright draw starts on top
       // of whatever is already on that cell rather than inside it
       const settled = resolveDraw(assembly, anchor, [1, 1, 1], gravityEnabled)?.position ?? anchor;
       onDrawPointerDown(settled);
     },
-    [mode, gridFromPointerEvent, onDrawPointerDown],
+    [mode, gridOnWorkingPlane, workspace.level, assembly, gravityEnabled, onDrawPointerDown],
   );
 
   const handleGroundPointerMove = useCallback(
     (e: any) => {
       if (mode.type !== "draw" || !drawDrag) return;
       e.stopPropagation();
-      const grid = gridFromPointerEvent(e);
+      const grid = gridOnWorkingPlane(e, workspace.level);
       if (!grid) return;
-      grid[1] = drawDrag?.start[1] ?? 0;
+      grid[1] = drawDrag?.start[1] ?? workspace.level;
       onDrawPointerMove(clampCellToWorkspace(grid));
     },
-    [mode, drawDrag, gridFromPointerEvent, onDrawPointerMove],
+    [mode, drawDrag, gridOnWorkingPlane, workspace.level, onDrawPointerMove],
   );
 
   // onDrawPointerUp is handled by window listeners in ViewportCanvas
@@ -2371,10 +2504,10 @@ function Scene({
         intensity={light.intensity}
         castShadow={light.shadows}
         shadow-mapSize={[light.resolution, light.resolution]}
-        shadow-camera-left={-SHADOW_EXTENT}
-        shadow-camera-right={SHADOW_EXTENT}
-        shadow-camera-top={SHADOW_EXTENT}
-        shadow-camera-bottom={-SHADOW_EXTENT}
+        shadow-camera-left={-shadowExtentFor(workspace.extent)}
+        shadow-camera-right={shadowExtentFor(workspace.extent)}
+        shadow-camera-top={shadowExtentFor(workspace.extent)}
+        shadow-camera-bottom={-shadowExtentFor(workspace.extent)}
         shadow-camera-near={1}
         shadow-camera-far={2000}
         shadow-bias={-0.0006}
@@ -2395,7 +2528,7 @@ function Scene({
           raycast={() => null}
           renderOrder={-2}
         >
-          <planeGeometry args={[SHADOW_EXTENT * 2, SHADOW_EXTENT * 2]} />
+          <planeGeometry args={[shadowExtentFor(workspace.extent) * 2, shadowExtentFor(workspace.extent) * 2]} />
           {/*
             depthWrite off is what stops the grid flickering. Two near-coplanar planes
             spanning to the horizon cannot be separated by the depth buffer at grazing
@@ -2448,7 +2581,8 @@ function Scene({
         <SuggestionPreview key={a.instanceId} definitionId={a.definitionId} position={a.cell} rotation={a.rotation} />
       ))}
 
-      <WorkspaceBounds />
+      <WorkspaceBounds extent={workspace.extent} />
+      <WorkingLevel level={workspace.level} extent={workspace.extent} opacity={workspace.levelOpacity} />
 
       {/* Invisible ground plane for raycasting */}
       <mesh
@@ -2507,7 +2641,7 @@ function Scene({
         );
       })}
 
-      {selectionBody && mode.type === "select" && !dragState && (
+      {showRotationGuides && selectionBody && mode.type === "select" && !dragState && (
         <RotationHandles centre={selectionBody.centre} radii={selectionBody.radii} onRotate={onRotateSelectedParts} />
       )}
 
@@ -2532,7 +2666,7 @@ function Scene({
             <DimensionLabel min={drawPreview.position} size={drawPreview.size} />
           </>
         ) : (
-          <DrawSpanCursor assembly={assembly} gravityEnabled={gravityEnabled} />
+          <DrawSpanCursor assembly={assembly} gravityEnabled={gravityEnabled} level={workspace.level} />
         ))}
 
       {/* Ghost preview in placement mode */}
@@ -2544,6 +2678,7 @@ function Scene({
           ghostRotation={ghostRotation}
           ghostStateRef={ghostStateRef}
           autoAim={autoAim}
+          workingLevel={workspace.level}
           yLift={yLift}
           snapEnabled={snapEnabled}
           gravityEnabled={gravityEnabled}
@@ -2619,6 +2754,27 @@ export function ViewportCanvas(props: ViewportProps) {
   useEffect(() => {
     saveLightSettings(light);
   }, [light]);
+
+  /** The buildable area, watched so the outline and the shadows follow a change */
+  const workspace = useSyncExternalStore(subscribeWorkspace, getWorkspace, getWorkspace);
+  const [workspacePanelOpen, setWorkspacePanelOpen] = useState(false);
+  const [levelPanelOpen, setLevelPanelOpen] = useState(false);
+
+  const [showRotationGuides, setShowRotationGuides] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(ROTATION_GUIDES_STORAGE_KEY) !== "0";
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ROTATION_GUIDES_STORAGE_KEY, showRotationGuides ? "1" : "0");
+    } catch {
+      /* ignore quota errors */
+    }
+  }, [showRotationGuides]);
 
   const [showConnectors, setShowConnectors] = useState<boolean>(() => {
     try {
@@ -3258,7 +3414,12 @@ export function ViewportCanvas(props: ViewportProps) {
             const camera = (window as any).__camera as THREE.Camera | undefined;
             if (camera) {
               const axis = rotationAxesFromCamera(camera)[e.key.toLowerCase() as "x" | "y" | "z"];
-              props.onRotateSelectedParts(axis, e.shiftKey ? 3 : 1);
+              // A press turns the part clockwise on the screen, shift the other way —
+              // which world direction that is depends on which side the camera is on
+              const pivot = props.rotationPivot ?? [0, 0, 0];
+              const clockwise = quarterTurnIsClockwise(camera, gridToWorld(pivot), axis);
+              const turns: 1 | 3 = clockwise === !e.shiftKey ? 1 : 3;
+              props.onRotateSelectedParts(axis, turns);
             }
             break;
           }
@@ -3428,7 +3589,9 @@ export function ViewportCanvas(props: ViewportProps) {
           selectionBody={selectionBody}
           fadedPartIds={fadedPartIds}
           showConnectors={showConnectors}
+          showRotationGuides={showRotationGuides}
           autoAim={autoAim}
+          workspace={workspace}
           adaptations={adaptations}
           onAdaptation={setAdaptations}
           adaptiveEnabled={props.adaptiveEnabled}
@@ -3453,42 +3616,125 @@ export function ViewportCanvas(props: ViewportProps) {
             <span className="viewport-inset__label">{view.label}</span>
           </div>
         ))}
-      <button
-        className={`viewport-shadow-toggle${light.shadows ? " viewport-mirror-toggle--on" : ""}`}
-        type="button"
-        onClick={() => setLightPanelOpen(true)}
-        title="Lighting and shadow settings"
-      >
-        Shadows
-      </button>
+      {/* One flexible row: fixed left offsets could not take another control */}
+      <div className="viewport-toolbelt">
+        <button
+          className={`viewport-shadow-toggle${light.shadows ? " viewport-mirror-toggle--on" : ""}`}
+          type="button"
+          onClick={() => setLightPanelOpen(true)}
+          title="Lighting and shadow settings"
+        >
+          Shadows
+        </button>
+        {/*
+          The working level is moved while building, not configured once, so it gets a
+          control of its own rather than a row inside a panel: one press per cell, and
+          the readout doubles as the way back to the ground.
+        */}
+        <div className="viewport-level">
+          <button
+            type="button"
+            className="viewport-level-step"
+            // Read the live value, not this render's: presses in quick succession would
+            // otherwise all compute from the same stale number and move it once
+            onClick={() => setWorkspace({ level: getWorkspace().level - 1 })}
+            disabled={workspace.level <= 0}
+            title="Lower the working level by one cell"
+          >
+            −
+          </button>
+          <button
+            type="button"
+            className="viewport-level-readout"
+            onClick={() => setWorkspace({ level: 0 })}
+            title={workspace.level > 0 ? "Put the working level back on the ground" : "The working level is the ground"}
+          >
+            {workspace.level === 0
+              ? "Level: ground"
+              : `Level: ${workspace.level} · ${Math.round((workspace.level * BASE_UNIT) / 10)} cm`}
+          </button>
+          <button
+            type="button"
+            className="viewport-level-step"
+            onClick={() => setWorkspace({ level: getWorkspace().level + 1 })}
+            disabled={workspace.level >= workspace.height}
+            title="Raise the working level by one cell"
+          >
+            +
+          </button>
+          <button
+            type="button"
+            className="viewport-level-step"
+            onClick={() => setLevelPanelOpen((v) => !v)}
+            title="How solid the level looks"
+          >
+            ⋯
+          </button>
+          {levelPanelOpen && (
+            <div className="viewport-level-panel" role="dialog" aria-label="Working level">
+              <label className="shadow-settings-row">
+                <span className="shadow-settings-label">Opacity</span>
+                <input
+                  type="range"
+                  min={WORKSPACE_LIMITS.levelOpacity.min}
+                  max={WORKSPACE_LIMITS.levelOpacity.max}
+                  step={0.02}
+                  value={workspace.levelOpacity}
+                  onChange={(e) => setWorkspace({ levelOpacity: Number(e.target.value) })}
+                />
+                <span className="shadow-settings-value">{Math.round(workspace.levelOpacity * 100)}%</span>
+              </label>
+            </div>
+          )}
+        </div>
+        <button
+          className="viewport-workspace-toggle"
+          type="button"
+          onClick={() => setWorkspacePanelOpen(true)}
+          title="Size of the buildable area"
+        >
+          Workspace
+        </button>
+        <button
+          className={`viewport-connectors-toggle${!showRotationGuides ? " viewport-mirror-toggle--on" : ""}`}
+          type="button"
+          onClick={() => setShowRotationGuides((v) => !v)}
+          title="The rotation rings around a selection — the keys turn it either way"
+        >
+          Guides: {showRotationGuides ? "On" : "Off"}
+        </button>
+        <button
+          className={`viewport-connectors-toggle${!showConnectors ? " viewport-mirror-toggle--on" : ""}`}
+          type="button"
+          onClick={() => setShowConnectors((v) => !v)}
+          title="Hide the connectors to read the run of the bars on their own"
+        >
+          Connectors: {showConnectors ? "On" : "Off"}
+        </button>
+        <button
+          className={`viewport-mirror-toggle${mirrorMinimap ? " viewport-mirror-toggle--on" : ""}`}
+          type="button"
+          onClick={() => setMirrorMinimap((v) => !v)}
+          title="Minimap showing the camera mirrored through the ground plane — the underside"
+        >
+          Mirror
+        </button>
+        <button
+          className={`viewport-camera-toggle ${isOrthographic ? "viewport-camera-toggle--ortho" : "viewport-camera-toggle--persp"}`}
+          type="button"
+          onClick={handleToggleCameraMode}
+          title="Toggle perspective/orthographic camera"
+        >
+          <span className="viewport-camera-toggle__thumb">{isOrthographic ? <OrthoIcon /> : <PerspIcon />}</span>
+          <span className="viewport-camera-toggle__label">{isOrthographic ? "ORTHO" : "PERSP"}</span>
+        </button>
+      </div>
       {lightPanelOpen && (
         <ShadowSettings settings={light} onChange={setLight} onClose={() => setLightPanelOpen(false)} />
       )}
-      <button
-        className={`viewport-connectors-toggle${!showConnectors ? " viewport-mirror-toggle--on" : ""}`}
-        type="button"
-        onClick={() => setShowConnectors((v) => !v)}
-        title="Hide the connectors to read the run of the bars on their own"
-      >
-        Connectors: {showConnectors ? "On" : "Off"}
-      </button>
-      <button
-        className={`viewport-mirror-toggle${mirrorMinimap ? " viewport-mirror-toggle--on" : ""}`}
-        type="button"
-        onClick={() => setMirrorMinimap((v) => !v)}
-        title="Minimap showing the camera mirrored through the ground plane — the underside"
-      >
-        Mirror
-      </button>
-      <button
-        className={`viewport-camera-toggle ${isOrthographic ? "viewport-camera-toggle--ortho" : "viewport-camera-toggle--persp"}`}
-        type="button"
-        onClick={handleToggleCameraMode}
-        title="Toggle perspective/orthographic camera"
-      >
-        <span className="viewport-camera-toggle__thumb">{isOrthographic ? <OrthoIcon /> : <PerspIcon />}</span>
-        <span className="viewport-camera-toggle__label">{isOrthographic ? "ORTHO" : "PERSP"}</span>
-      </button>
+      {workspacePanelOpen && (
+        <WorkspaceSettings size={workspace} onChange={setWorkspace} onClose={() => setWorkspacePanelOpen(false)} />
+      )}
       {boxSelectRect && (
         <div
           className="box-select-overlay"

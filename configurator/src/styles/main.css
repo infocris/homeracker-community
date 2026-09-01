@@ -538,10 +538,80 @@
 }
 
 .viewport-shadow-toggle {
+  height: 34px;
+  padding: 0 14px;
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--bg-primary);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  color: #f4f8ff;
+  cursor: pointer;
+}
+
+.viewport-level {
+  position: relative;
+  height: 34px;
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--bg-primary);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+}
+
+.viewport-level-step,
+.viewport-level-panel {
   position: absolute;
-  left: 224px;
-  bottom: 20px;
-  z-index: 6;
+  bottom: 42px;
+  left: 0;
+  min-width: 230px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.viewport-level-panel .shadow-settings-row {
+  margin: 0;
+}
+
+.viewport-level-readout {
+  border: 0;
+  background: transparent;
+  color: #f4f8ff;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0 10px;
+}
+
+.viewport-level-step {
+  width: 28px;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.viewport-level-step:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.viewport-level-step:hover:not(:disabled),
+.viewport-level-readout:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.viewport-level-readout {
+  border-left: 1px solid var(--bg-primary);
+  border-right: 1px solid var(--bg-primary);
+  white-space: nowrap;
+}
+
+.viewport-workspace-toggle {
   height: 34px;
   padding: 0 14px;
   display: flex;
@@ -556,10 +626,6 @@
 }
 
 .viewport-connectors-toggle {
-  position: absolute;
-  left: 400px;
-  bottom: 20px;
-  z-index: 6;
   height: 34px;
   padding: 0 14px;
   display: flex;
@@ -574,10 +640,6 @@
 }
 
 .viewport-mirror-toggle {
-  position: absolute;
-  left: 320px;
-  bottom: 20px;
-  z-index: 6;
   height: 34px;
   padding: 0 14px;
   display: flex;
@@ -597,10 +659,6 @@
 }
 
 .viewport-camera-toggle {
-  position: absolute;
-  left: 132px;
-  bottom: 20px;
-  z-index: 6;
   width: 80px;
   height: 34px;
   display: flex;
@@ -1185,6 +1243,48 @@
 .shadow-settings-note {
   font-size: 11px;
   line-height: 1.4;
+  color: var(--text-secondary);
+}
+
+.viewport-toolbelt {
+  position: absolute;
+  left: 20px;
+  bottom: 20px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  max-width: calc(100% - 40px);
+}
+
+.part-inspector {
+  border-bottom: 1px solid var(--border);
+  background: rgba(0, 170, 255, 0.07);
+  padding: 8px 12px 10px;
+}
+
+.part-inspector-canvas {
+  height: 190px;
+  border-radius: 6px;
+  background: var(--bg-primary);
+  overflow: hidden;
+  cursor: grab;
+}
+
+.part-inspector-canvas:active {
+  cursor: grabbing;
+}
+
+.part-inspector-name {
+  margin-top: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.part-inspector-hint {
+  font-size: 10px;
   color: var(--text-secondary);
 }
 

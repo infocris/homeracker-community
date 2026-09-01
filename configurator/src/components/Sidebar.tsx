@@ -21,6 +21,7 @@ import type {
   Rotation3,
 } from "../types";
 import type { TopologySuggestion } from "../assembly/compatibility";
+import { PartInspector } from "./PartInspector";
 
 interface SidebarProps {
   onSelectPart: (definitionId: string) => void;
@@ -49,6 +50,8 @@ interface SidebarProps {
     suggestions: TopologySuggestion[];
   } | null;
   onReplaceConnector: (instanceId: string, definitionId: string, rotation: Rotation3) => void;
+  /** The selected connector, shown large and free to turn at the top of the list */
+  inspected: { definitionId: string; name: string } | null;
 }
 
 const SECTIONS: {
@@ -142,6 +145,7 @@ export function Sidebar({
   onHoverSuggestion,
   replacement,
   onReplaceConnector,
+  inspected,
 }: SidebarProps) {
   const activePlaceId = activeMode.type === "place" ? activeMode.definitionId : null;
 
@@ -230,6 +234,8 @@ export function Sidebar({
           </a>
         </div>
       </div>
+
+      {inspected && <PartInspector definitionId={inspected.definitionId} name={inspected.name} />}
 
       <div className="sidebar-draw-group">
         <button

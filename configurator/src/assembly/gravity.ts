@@ -4,6 +4,7 @@ import { gridKeysForCell } from "./AssemblyState";
 import { getPartDefinition } from "../data/catalog";
 import { getWorldCells, rotateGridCells } from "./grid-utils";
 import { cellParticipant, isValidPullThroughOverlap, type CellParticipant } from "./collision";
+import { getWorkspace } from "./workspace";
 
 /** How far a part may climb before gravity gives up and leaves it under the cursor. */
 export const MAX_GRAVITY_RISE = 32;
@@ -120,10 +121,21 @@ export function settleWithGravity(
 ): GridPosition {
   const [x, , z] = position;
 
-  // The part's own cells may hang below its origin, so the floor is whichever is
-  // higher: the caller's ground lift, or the offset that keeps the lowest cell at 0.
+  /*
+   * The part's own cells may hang below its origin, so the floor is whichever is
+   * highest: the caller's ground lift, or the offset that keeps the lowest cell on the
+   * floor it is falling to — the ground, or the working level when one is set. Gravity
+   * does not pass through that level; a part with nothing under it comes to rest on it.
+   */
   const cellFloor = placementFloor(definitionId, [0, 0, 0], rotation, orientation) ?? 0;
-  const minY = Math.max(groundY, -cellFloor);
+  /*
+   * The working level catches what falls onto it from above; it does not lift what is
+   * already below it. Gravity only ever pulls down, so a part under the level keeps
+   * falling to the ground — the level is simply not in its way.
+   */
+  const level = getWorkspace().level;
+  const floorY = position[1] + cellFloor >= level ? level : 0;
+  const minY = Math.max(groundY, floorY - cellFloor);
 
   const risen = restOnCollision(assembly, definitionId, position, rotation, orientation, ignoreIds);
   let y = Math.max(risen[1], minY);

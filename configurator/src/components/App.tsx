@@ -328,6 +328,15 @@ export function App() {
 
   lockedPartIdsRef.current = lockedPartIds;
 
+  /** The selected connector, for the inspector at the top of the list */
+  const inspected = useMemo(() => {
+    if (selectedPartIds.size !== 1) return null;
+    const part = assembly.getPartById([...selectedPartIds][0]);
+    const def = part ? getPartDefinition(part.definitionId) : undefined;
+    if (!def || def.category !== "connector") return null;
+    return { definitionId: def.id, name: def.name };
+  }, [selectedPartIds, snapshot.parts]);
+
   /** The selected connectors, and whether the lock is off on all of them */
   const lockSelection = useMemo(() => {
     const connectors = [...selectedPartIds].filter((id) => {
@@ -1645,6 +1654,7 @@ export function App() {
         onHoverSuggestion={setPreviewSuggestion}
         replacement={replacement}
         onReplaceConnector={handleReplaceConnector}
+        inspected={inspected}
       />
       <div className="main-area">
         <Toolbar

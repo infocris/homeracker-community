@@ -1,5 +1,5 @@
 import type { GridPosition, Axis, Direction, Rotation3, RotationStep } from "../types";
-import { WORKSPACE_EXTENT, WORKSPACE_HEIGHT } from "../constants";
+import { getWorkspace } from "./workspace";
 
 /** Offset that brings a span back inside [lo, hi]. A span longer than the range
  *  is anchored to `lo` — it has to overflow somewhere. */
@@ -27,21 +27,19 @@ export function clampToWorkspace(cells: GridPosition[], position: GridPosition, 
     }
   }
 
+  const { extent, height } = getWorkspace();
   return [
-    position[0] + shiftInto(min[0], max[0], -WORKSPACE_EXTENT, WORKSPACE_EXTENT),
-    position[1] + shiftInto(min[1], max[1], 0, WORKSPACE_HEIGHT),
-    position[2] + shiftInto(min[2], max[2], -WORKSPACE_EXTENT, WORKSPACE_EXTENT),
+    position[0] + shiftInto(min[0], max[0], -extent, extent),
+    position[1] + shiftInto(min[1], max[1], 0, height),
+    position[2] + shiftInto(min[2], max[2], -extent, extent),
   ];
 }
 
 /** Clamp a bare grid cell to the workspace footprint (used while drawing). */
 export function clampCellToWorkspace(cell: GridPosition): GridPosition {
   const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
-  return [
-    clamp(cell[0], -WORKSPACE_EXTENT, WORKSPACE_EXTENT),
-    clamp(cell[1], 0, WORKSPACE_HEIGHT),
-    clamp(cell[2], -WORKSPACE_EXTENT, WORKSPACE_EXTENT),
-  ];
+  const { extent, height } = getWorkspace();
+  return [clamp(cell[0], -extent, extent), clamp(cell[1], 0, height), clamp(cell[2], -extent, extent)];
 }
 
 /**
