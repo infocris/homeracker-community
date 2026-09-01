@@ -88,9 +88,14 @@ function getCategoryIcon(category: PartCategory): string {
 
 function PartButton({ part, isActive, onSelect }: { part: PartDefinition; isActive: boolean; onSelect: () => void }) {
   const color = PART_COLORS[part.category] || PART_COLORS.custom;
-  const thumbnail = useThumbnail(part);
+  const { ref, dataURL: thumbnail } = useThumbnail(part);
   return (
-    <button className={`catalog-item ${isActive ? "active" : ""}`} onClick={onSelect} title={part.description}>
+    <button
+      ref={ref}
+      className={`catalog-item ${isActive ? "active" : ""}`}
+      onClick={onSelect}
+      title={part.description}
+    >
       <div
         className="catalog-item-preview"
         style={{

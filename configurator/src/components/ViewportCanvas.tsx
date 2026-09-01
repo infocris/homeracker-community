@@ -170,6 +170,29 @@ const JUNCTION_VIEWS: { key: string; label: string; direction: [number, number, 
 /** Distance the junction cameras sit from the cell, in world units */
 const JUNCTION_DISTANCE = 8 * BASE_UNIT;
 
+/**
+ * The shadow map only needs redrawing when the scene or the light changes, not on
+ * every frame. Left on automatic it re-renders the whole scene from the light 60
+ * times a second, which is most of the cost of having shadows at all — and enough,
+ * under software WebGL, to saturate the main thread.
+ */
+function ShadowUpdater({ parts, light }: { parts: PlacedPart[]; light: LightSettings }) {
+  const gl = useThree((state) => state.gl);
+
+  useEffect(() => {
+    gl.shadowMap.autoUpdate = false;
+    return () => {
+      gl.shadowMap.autoUpdate = true;
+    };
+  }, [gl]);
+
+  useEffect(() => {
+    gl.shadowMap.needsUpdate = true;
+  }, [gl, parts, light]);
+
+  return null;
+}
+
 type InsetRect = { x: number; y: number; w: number; h: number };
 
 /** The same fractions the scissor uses, as CSS so the frame lands on the render. */
@@ -1834,6 +1857,7 @@ function Scene({
       <ExposeScene />
       <FitCamera parts={parts} />
       {/* Lighting */}
+      <ShadowUpdater parts={parts} light={light} />
       <ambientLight intensity={light.ambient} />
       {/* Same direction as before, pushed out so the orthographic shadow camera has
           room to span the workspace instead of the default few units */}

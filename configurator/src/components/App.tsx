@@ -1087,7 +1087,10 @@ export function App() {
 
   const bom = assembly.getBOM();
 
-  if (!ready) return null;
+  // Rendered without waiting on the restore: the ordering that matters — custom part
+  // definitions before deserialize — is guaranteed inside initPromise, not by holding
+  // the UI back. The store notifies once parts land, so the scene fills itself in.
+  void ready;
 
   return (
     <div className="app">

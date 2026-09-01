@@ -23,7 +23,7 @@ export const DEFAULT_LIGHT_SETTINGS: LightSettings = {
   elevation: 55,
   intensity: 2.9,
   ambient: 2.1,
-  resolution: 2048,
+  resolution: 1024,
 };
 
 export function loadLightSettings(): LightSettings {
