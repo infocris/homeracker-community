@@ -399,69 +399,94 @@ export function adaptiveConnectorsFor(
   return out;
 }
 
-/** Bars that can be threaded through a cell along `axis` without an illegal overlap. */
-function barsThrough(assembly: AssemblyState, cell: GridPosition, axis: Axis): PartDefinition[] {
+/** Where a bar sits if it is threaded through a cell along `axis`, or null. */
+function barThroughPlacement(
+  assembly: AssemblyState,
+  def: PartDefinition,
+  cell: GridPosition,
+  axis: Axis,
+): PointPlacement | null {
+  if (def.category !== "support") return null;
   const index = axis === "x" ? 0 : axis === "y" ? 1 : 2;
-  return PART_CATALOG.filter((def) => {
-    if (def.category !== "support") return false;
-    const length = def.gridCells.length;
-    // Any offset that still covers the cell counts — one clear placement is enough
-    for (let back = 0; back < length; back++) {
-      const origin: GridPosition = [...cell];
-      origin[index] -= back;
-      if (origin[1] < 0) continue;
-      if (!placementCollides(assembly, def.id, origin, IDENTITY_ROTATION, axis)) return true;
+  // Any offset that still covers the cell will do; the shortest reach back comes first
+  for (let back = 0; back < def.gridCells.length; back++) {
+    const origin: GridPosition = [...cell];
+    origin[index] -= back;
+    if (origin[1] < 0) continue;
+    if (!placementCollides(assembly, def.id, origin, IDENTITY_ROTATION, axis)) {
+      return { position: origin, rotation: IDENTITY_ROTATION, orientation: axis };
     }
-    return false;
-  });
+  }
+  return null;
 }
 
-/** Pull-through connectors that can be threaded onto a bar at this cell. */
-function connectorsThrough(assembly: AssemblyState, cell: GridPosition, axis: Axis): PartDefinition[] {
-  return PART_CATALOG.filter((def) => {
-    if (def.category !== "connector" || !def.pullThroughAxis) return false;
-    return rotationsAligning(def.pullThroughAxis, axis).some(
-      (rotation) => !placementCollides(assembly, def.id, cell, rotation),
-    );
-  });
+/** How a pull-through connector sits if it is threaded onto a bar at this cell. */
+function connectorThroughPlacement(
+  assembly: AssemblyState,
+  def: PartDefinition,
+  cell: GridPosition,
+  axis: Axis,
+): PointPlacement | null {
+  if (def.category !== "connector" || !def.pullThroughAxis) return null;
+  const rotation = rotationsAligning(def.pullThroughAxis, axis).find(
+    (candidate) => !placementCollides(assembly, def.id, cell, candidate),
+  );
+  return rotation ? { position: cell, rotation } : null;
 }
+
+/** Where a part goes when it is chosen for a picked spot. */
+export type PointPlacement = { position: GridPosition; rotation: Rotation3; orientation?: Axis };
 
 /**
- * Catalog parts that can actually attach at this point, decided by the assembly's
- * own snap and collision rules rather than a separate notion of compatibility — so
- * the filtered list is exactly what the app would accept there.
+ * Where `candidate` would go if it were chosen for this spot, or null when it cannot
+ * go there at all.
+ *
+ * Decided by the assembly's own snap and collision rules rather than a separate notion
+ * of compatibility, and it is the single answer behind all three uses: the filtered
+ * list is the parts this resolves, the hover ghost stands where it says, and choosing
+ * one drops it exactly there.
  */
-export function compatiblePartsAt(assembly: AssemblyState, part: PlacedPart, point: AttachmentPoint): PartDefinition[] {
+export function placementAtPoint(
+  assembly: AssemblyState,
+  part: PlacedPart,
+  point: AttachmentPoint,
+  candidate: PartDefinition,
+): PointPlacement | null {
   const def = getPartDefinition(part.definitionId);
-  if (!def) return [];
+  if (!def) return null;
   const target = targetCellOf(point);
-  if (target[1] < 0) return [];
+  if (target[1] < 0) return null;
 
   if (point.fit === "through") {
     const axis = AXIS_OF[point.direction[1]];
-    return def.category === "support" ? connectorsThrough(assembly, target, axis) : barsThrough(assembly, target, axis);
+    return def.category === "support"
+      ? connectorThroughPlacement(assembly, candidate, target, axis)
+      : barThroughPlacement(assembly, candidate, target, axis);
   }
 
   // A bar end butting into the middle of another bar: nothing snaps onto a cell that
   // is already taken, so the sockets have nothing to say here. What belongs there is a
   // connector threaded onto the bar in the way, with an arm reaching back along this one.
   if (def.category === "support" && throughDirectionsAt(assembly, target).length > 0) {
+    if (candidate.category !== "connector") return null;
     const reachBack = oppositeDirection(point.direction);
-    return PART_CATALOG.filter(
-      (candidate) =>
-        candidate.category === "connector" &&
-        rotationFittingBranches(assembly, candidate, target, [reachBack]) !== null,
-    );
+    const rotation = rotationFittingBranches(assembly, candidate, target, [reachBack]);
+    return rotation ? { position: target, rotation } : null;
   }
 
   // A socket takes a bar; a bar end takes a connector
   const wanted = def.category === "support" ? "connector" : "support";
-  return PART_CATALOG.filter((candidate) => {
-    if (candidate.category !== wanted) return false;
-    const snaps =
-      wanted === "support"
-        ? findSnapPoints(assembly, candidate.id, target, 1)
-        : findConnectorSnapPoints(assembly, candidate.id, target, 1);
-    return snaps.some((s) => s.connectorInstanceId === part.instanceId && s.socketDirection === point.direction);
-  });
+  if (candidate.category !== wanted) return null;
+  const snaps =
+    wanted === "support"
+      ? findSnapPoints(assembly, candidate.id, target, 1)
+      : findConnectorSnapPoints(assembly, candidate.id, target, 1);
+  const snap = snaps.find((s) => s.connectorInstanceId === part.instanceId && s.socketDirection === point.direction);
+  if (!snap) return null;
+  return { position: snap.position, rotation: snap.autoRotation ?? IDENTITY_ROTATION, orientation: snap.orientation };
+}
+
+/** Catalog parts that can actually attach at this point. */
+export function compatiblePartsAt(assembly: AssemblyState, part: PlacedPart, point: AttachmentPoint): PartDefinition[] {
+  return PART_CATALOG.filter((candidate) => placementAtPoint(assembly, part, point, candidate) !== null);
 }

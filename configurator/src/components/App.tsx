@@ -15,7 +15,7 @@ import type {
   ClipboardData,
   DrawAxis,
 } from "../types";
-import { getPartDefinition } from "../data/catalog";
+import { PART_CATALOG, getPartDefinition } from "../data/catalog";
 import {
   bestPartForSize,
   clampToSupportLength,
@@ -28,11 +28,13 @@ import { rotateBlock } from "../assembly/block-rotation";
 import {
   type AttachmentPoint,
   type ConnectorAdaptation,
+  type PointPlacement,
   adaptiveConnectorsFor,
   attachmentPointsOf,
   compatiblePartsAt,
   nearestAttachmentPoint,
   branchDirectionsAt,
+  placementAtPoint,
   replacementSuggestionsAt,
   targetCellOf,
   throughDirectionsAt,
@@ -383,11 +385,6 @@ export function App() {
   const handleLockedPartDrag = useCallback(() => {
     setToast("Connector locked — use Unlock in the toolbar to move it");
     setTimeout(() => setToast(null), 2500);
-  }, []);
-
-  const handleSelectPart = useCallback((definitionId: string) => {
-    setMode({ type: "place", definitionId });
-    setSelectedPartIds(new Set());
   }, []);
 
   const handlePlacePart = useCallback(
@@ -1099,6 +1096,8 @@ export function App() {
     definitionId: string;
     position: GridPosition;
     rotation: Rotation3;
+    /** A bar lies along an axis; without this the ghost would stand the wrong way */
+    orientation?: Axis;
     /** Connector this one would stand in for, hidden while the ghost takes its place */
     replaces?: string;
   } | null>(null);
@@ -1111,8 +1110,8 @@ export function App() {
 
   /** Drop a suggestion straight onto the spot it was suggested for */
   const handlePlaceAtPoint = useCallback(
-    (definitionId: string, position: GridPosition, rotation: Rotation3) => {
-      handlePlacePart(definitionId, position, rotation);
+    (definitionId: string, position: GridPosition, rotation: Rotation3, orientation?: Axis) => {
+      handlePlacePart(definitionId, position, rotation, orientation);
       setSelectedPoint(null);
       setPreviewSuggestion(null);
       // Select what was just placed, so the junction views carry on showing it
@@ -1201,13 +1200,50 @@ export function App() {
     setPreviewSuggestion(null);
   }, []);
 
-  const compatibleDefinitionIds = useMemo(() => {
-    if (!activePoint || !filterByPosition || selectedPartIds.size !== 1) return null;
+  /**
+   * Where each catalog part would go if it were chosen for the picked spot.
+   *
+   * Worked out once and used three ways — to filter the list, to ghost a part under
+   * the pointer, and to drop the one that is clicked — so the list cannot offer a
+   * part the click would put somewhere else.
+   */
+  const placementsAtPoint = useMemo(() => {
+    if (!activePoint || selectedPartIds.size !== 1) return null;
     const part = assembly.getPartById([...selectedPartIds][0]);
     if (!part) return null;
-    return new Set(compatiblePartsAt(assembly, part, activePoint).map((d) => d.id));
+    const found = new Map<string, PointPlacement>();
+    for (const def of PART_CATALOG) {
+      const spot = placementAtPoint(assembly, part, activePoint, def);
+      if (spot) found.set(def.id, spot);
+    }
+    return found;
     // snapshot.parts is in the deps because occupancy decides what still fits
-  }, [activePoint, filterByPosition, selectedPartIds, snapshot.parts]);
+  }, [activePoint, selectedPartIds, snapshot.parts]);
+
+  const compatibleDefinitionIds = useMemo(() => {
+    if (!filterByPosition || !placementsAtPoint) return null;
+    return new Set(placementsAtPoint.keys());
+  }, [filterByPosition, placementsAtPoint]);
+
+  /**
+   * Choosing a part from the library.
+   *
+   * With a spot picked on the selection, a part that fits it goes straight there —
+   * the spot was the request, so asking for a click in the scene as well would be
+   * asking twice. Anything that does not fit arms the cursor as before.
+   */
+  const handleSelectPart = useCallback(
+    (definitionId: string) => {
+      const spot = placementsAtPoint?.get(definitionId);
+      if (spot) {
+        handlePlaceAtPoint(definitionId, spot.position, spot.rotation, spot.orientation);
+        return;
+      }
+      setMode({ type: "place", definitionId });
+      setSelectedPartIds(new Set());
+    },
+    [placementsAtPoint, handlePlaceAtPoint],
+  );
 
   const handleClickEmpty = useCallback(() => {
     setSelectedPartIds(new Set());
@@ -1642,6 +1678,7 @@ export function App() {
     <div className="app">
       <Sidebar
         onSelectPart={handleSelectPart}
+        placementsAtPoint={placementsAtPoint}
         activeMode={mode}
         usedDefinitionIds={new Set(snapshot.parts.map((p) => p.definitionId))}
         hasSelectedPoint={!!activePoint}

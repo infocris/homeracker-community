@@ -139,7 +139,13 @@ interface ViewportProps {
   /** Attachment point picked by re-clicking the selected part, highlighted in the scene */
   selectedPoint: AttachmentPoint | null;
   /** Suggestion under the cursor in the sidebar, previewed in place */
-  previewSuggestion: { definitionId: string; position: GridPosition; rotation: Rotation3; replaces?: string } | null;
+  previewSuggestion: {
+    definitionId: string;
+    position: GridPosition;
+    rotation: Rotation3;
+    orientation?: Axis;
+    replaces?: string;
+  } | null;
   onClickEmpty: () => void;
   onDeleteSelected: () => void;
   onPasteParts: (clipboard: ClipboardData, targetPosition: GridPosition, extraRotation?: Rotation3) => void;
@@ -274,6 +280,27 @@ function ownerPartOf(object: THREE.Object3D): string | null {
     if (typeof id === "string") return id;
   }
   return null;
+}
+
+/** The nearest hit on a placed part, or null when the ray only met the scenery. */
+function firstPartHit(intersections: THREE.Intersection[]): THREE.Intersection | null {
+  for (const hit of intersections) {
+    if (ownerPartOf(hit.object)) return hit;
+  }
+  return null;
+}
+
+/**
+ * The empty cell beside a hit on a part: half a cell out along the face that was hit.
+ *
+ * A press on a surface means the cell in front of it, not the cell behind it, and a
+ * point lying exactly on a face boundary rounds either way — which is what makes the
+ * step out necessary rather than merely tidy.
+ */
+function cellBesideHit(hit: THREE.Intersection): GridPosition | null {
+  if (!hit.face) return null;
+  const outward = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+  return snapToGrid(hit.point.clone().addScaledVector(outward, BASE_UNIT * 0.5));
 }
 
 /**
@@ -556,15 +583,18 @@ function SuggestionPreview({
   definitionId,
   position,
   rotation,
+  orientation,
 }: {
   definitionId: string;
   position: GridPosition;
   rotation: Rotation3;
+  /** A bar lies along an axis; without this it would be ghosted standing up */
+  orientation?: Axis;
 }) {
   return (
     <group position={gridToWorld(position)}>
-      <Suspense fallback={<GhostFallback definitionId={definitionId} isSnapped />}>
-        <GhostModel definitionId={definitionId} rotation={rotation} isSnapped />
+      <Suspense fallback={<GhostFallback definitionId={definitionId} orientation={orientation} isSnapped />}>
+        <GhostModel definitionId={definitionId} rotation={rotation} orientation={orientation} isSnapped />
       </Suspense>
     </group>
   );
@@ -963,14 +993,21 @@ function previewPart(part: PlacedPart, preview: ResizePreview): PlacedPart {
 }
 
 /**
- * Length of the bar being resized or selected, in cube units and centimetres. Pinned
- * to the bar rather than the corner of the screen, so it is where the eye already is.
+ * Length of the bar being resized or selected, in cube units and centimetres, and how
+ * high off the ground it sits when it is not on it. Pinned to the bar rather than the
+ * corner of the screen, so it is where the eye already is.
+ *
+ * The height is the clearance under the part — the same count the height guides tick
+ * off below it — because that is the measurement you take to a shelf, not the height
+ * of its top edge.
+ *
  * pointerEvents stays off: R3F raycasts through the container this sits in, and a
  * label that swallowed clicks would break selecting the part underneath.
  */
 function DimensionLabel({ min, size }: { min: GridPosition; size: [number, number, number] }) {
   const cells = Math.max(size[0], size[1], size[2]);
   const centre = gridToWorld([min[0] + (size[0] - 1) / 2, min[1] + (size[1] - 1) / 2, min[2] + (size[2] - 1) / 2]);
+  const reading = (units: number) => `${units}u · ${((units * BASE_UNIT) / 10).toFixed(1)} cm`;
   return (
     <Html
       position={[centre[0], centre[1] + BASE_UNIT * 0.9, centre[2]]}
@@ -979,7 +1016,9 @@ function DimensionLabel({ min, size }: { min: GridPosition; size: [number, numbe
       style={{ pointerEvents: "none" }}
     >
       <span className="dimension-label">
-        {cells}u · {((cells * BASE_UNIT) / 10).toFixed(1)} cm
+        {/* A single cell has no length worth stating; its height still does */}
+        {cells > 1 && reading(cells)}
+        {min[1] > 0 && <span className={cells > 1 ? "dimension-label-height" : undefined}>↑ {reading(min[1])}</span>}
       </span>
     </Html>
   );
@@ -1050,6 +1089,11 @@ function WorkspaceBounds({ extent }: { extent: number }) {
  * 1×1×1 cell that follows the cursor before a draw drag starts. Under gravity it
  * sits on top of whatever is already there, so the cell you are about to anchor on
  * is the cell the part will actually start from.
+ *
+ * What is under the pointer is asked of the parts first and of the plane only after:
+ * a part standing in the way is nearer than the plane behind it, and reading the
+ * plane through it would put the cell where the ground is *seen*, several cells from
+ * the surface being pointed at.
  */
 function DrawSpanCursor({
   assembly,
@@ -1060,7 +1104,7 @@ function DrawSpanCursor({
   gravityEnabled: boolean;
   level: number;
 }) {
-  const { camera, raycaster, pointer } = useThree();
+  const { camera, raycaster, pointer, scene } = useThree();
   const [gridPos, setGridPos] = useState<GridPosition>([0, 0, 0]);
   // Drawing happens on the working level when one is up, so the cursor is picked
   // against that plane — taking it from the ground would put the cell under the eye
@@ -1070,10 +1114,18 @@ function DrawSpanCursor({
 
   useFrame(() => {
     raycaster.setFromCamera(pointer, camera);
-    if (!raycaster.ray.intersectPlane(plane, intersectPoint)) return;
-    const grid = clampCellToWorkspace(snapToGrid(intersectPoint));
-    grid[1] = level;
-    const settled = resolveDraw(assembly, grid, [1, 1, 1], gravityEnabled)?.position ?? grid;
+
+    const partGroups = scene.children.filter((child) => typeof child.userData?.partInstanceId === "string");
+    const onPart = raycaster.intersectObjects(partGroups, true)[0];
+    let grid = onPart ? cellBesideHit(onPart) : null;
+
+    if (!grid) {
+      if (!raycaster.ray.intersectPlane(plane, intersectPoint)) return;
+      grid = snapToGrid(intersectPoint);
+      grid[1] = level;
+    }
+
+    const settled = resolveDraw(assembly, clampCellToWorkspace(grid), [1, 1, 1], gravityEnabled)?.position ?? grid;
     setGridPos((prev) => (prev[0] === settled[0] && prev[1] === settled[1] && prev[2] === settled[2] ? prev : settled));
   });
 
@@ -2287,7 +2339,6 @@ interface SceneProps extends ViewportProps {
   collidingPartIds: Set<string>;
   drawDrag: { start: GridPosition; current: GridPosition } | null;
   onDrawPointerDown: (grid: GridPosition) => void;
-  onDrawPointerMove: (grid: GridPosition) => void;
   onDrawPointerUp: () => void;
   resizePreview: ResizePreview | null;
   onResizePreview: (preview: ResizePreview | null) => void;
@@ -2344,7 +2395,6 @@ function Scene({
   collidingPartIds,
   drawDrag,
   onDrawPointerDown,
-  onDrawPointerMove,
   onDrawPointerUp,
   resizePreview,
   onResizePreview,
@@ -2431,9 +2481,12 @@ function Scene({
       if (mode.type !== "draw") return;
       if (e.button !== 0) return; // right button cancels, middle pans — neither draws
       e.stopPropagation();
-      const grid = gridOnWorkingPlane(e, workspace.level);
+      // A part under the pointer is what the press is on, plane or no plane — the same
+      // reason the draw cursor asks the parts first
+      const onPart = firstPartHit(e.intersections ?? []);
+      const grid = onPart ? cellBesideHit(onPart) : gridOnWorkingPlane(e, workspace.level);
       if (!grid) return;
-      grid[1] = workspace.level;
+      if (!onPart) grid[1] = workspace.level;
       const anchor = clampCellToWorkspace(grid);
       // Anchor where the part will actually rest, so an upright draw starts on top
       // of whatever is already on that cell rather than inside it
@@ -2443,19 +2496,9 @@ function Scene({
     [mode, gridOnWorkingPlane, workspace.level, assembly, gravityEnabled, onDrawPointerDown],
   );
 
-  const handleGroundPointerMove = useCallback(
-    (e: any) => {
-      if (mode.type !== "draw" || !drawDrag) return;
-      e.stopPropagation();
-      const grid = gridOnWorkingPlane(e, workspace.level);
-      if (!grid) return;
-      grid[1] = drawDrag?.start[1] ?? workspace.level;
-      onDrawPointerMove(clampCellToWorkspace(grid));
-    },
-    [mode, drawDrag, gridOnWorkingPlane, workspace.level, onDrawPointerMove],
-  );
-
-  // onDrawPointerUp is handled by window listeners in ViewportCanvas
+  // Tracking the drag itself is left to the window listeners in ViewportCanvas: they
+  // read the span off a plane through the anchor cell, wherever that cell ended up,
+  // and keep working when the pointer leaves the ground mesh
   void onDrawPointerUp;
 
   // Guides for any selected part that is off the ground
@@ -2479,7 +2522,9 @@ function Scene({
     const part = parts.find((p) => p.instanceId === hoveredPartId);
     if (!part) return null;
     const bounds = placedPartBounds(part);
-    if (!bounds || Math.max(...bounds.size) <= 1) return null;
+    if (!bounds) return null;
+    // A single cell on the ground has nothing to report; off the ground, its height does
+    if (Math.max(...bounds.size) <= 1 && bounds.min[1] <= 0) return null;
     return bounds;
   }, [resizePreview, hoveredPartId, parts]);
 
@@ -2575,6 +2620,7 @@ function Scene({
           definitionId={previewSuggestion.definitionId}
           position={previewSuggestion.position}
           rotation={previewSuggestion.rotation}
+          orientation={previewSuggestion.orientation}
         />
       )}
       {adaptations.map((a) => (
@@ -2591,7 +2637,6 @@ function Scene({
         position={[0, 0, 0]}
         onClick={handleGroundClick}
         onPointerDown={handleGroundPointerDown}
-        onPointerMove={handleGroundPointerMove}
         visible={false}
       >
         <planeGeometry args={[GRID_EXTENT * BASE_UNIT * 4, GRID_EXTENT * BASE_UNIT * 4]} />
@@ -2873,10 +2918,6 @@ export function ViewportCanvas(props: ViewportProps) {
 
   const handleDrawPointerDown = useCallback((grid: GridPosition) => {
     setDrawDrag({ start: grid, current: grid });
-  }, []);
-
-  const handleDrawPointerMove = useCallback((grid: GridPosition) => {
-    setDrawDrag((prev) => (prev ? { ...prev, current: grid } : null));
   }, []);
 
   const drawAxis: DrawAxis = props.mode.type === "draw" ? props.mode.axis : "horizontal";
@@ -3581,7 +3622,6 @@ export function ViewportCanvas(props: ViewportProps) {
           collidingPartIds={collidingPartIds}
           drawDrag={drawDrag}
           onDrawPointerDown={handleDrawPointerDown}
-          onDrawPointerMove={handleDrawPointerMove}
           onDrawPointerUp={handleDrawPointerUp}
           resizePreview={resizePreview}
           onResizePreview={setResizePreview}

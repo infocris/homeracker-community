@@ -12,6 +12,7 @@ import {
 } from "../data/custom-parts";
 import { useThumbnail } from "../thumbnails/useThumbnail";
 import type {
+  Axis,
   Direction,
   DrawAxis,
   GridPosition,
@@ -20,7 +21,7 @@ import type {
   PartDefinition,
   Rotation3,
 } from "../types";
-import type { TopologySuggestion } from "../assembly/compatibility";
+import type { PointPlacement, TopologySuggestion } from "../assembly/compatibility";
 import { PartInspector } from "./PartInspector";
 import { PartHoverCard } from "./PartHoverCard";
 
@@ -39,7 +40,13 @@ interface SidebarProps {
   topology: { cell: GridPosition; branches: Direction[]; suggestions: TopologySuggestion[] } | null;
   onPlaceAtPoint: (definitionId: string, position: GridPosition, rotation: Rotation3) => void;
   onHoverSuggestion: (
-    preview: { definitionId: string; position: GridPosition; rotation: Rotation3; replaces?: string } | null,
+    preview: {
+      definitionId: string;
+      position: GridPosition;
+      rotation: Rotation3;
+      orientation?: Axis;
+      replaces?: string;
+    } | null,
   ) => void;
   /** The selected connector and the connectors that could stand in for it */
   replacement: {
@@ -53,6 +60,11 @@ interface SidebarProps {
   onReplaceConnector: (instanceId: string, definitionId: string, rotation: Rotation3) => void;
   /** The selected connector, shown large and free to turn at the top of the list */
   inspected: { definitionId: string; name: string } | null;
+  /**
+   * Where each catalog part would land if it were chosen for the picked spot. Drives
+   * the ghost under the pointer; the click itself is resolved the same way upstream.
+   */
+  placementsAtPoint: Map<string, PointPlacement> | null;
 }
 
 const SECTIONS: {
@@ -110,12 +122,15 @@ function PartButton({
   isActive,
   onSelect,
   hoverPreview = true,
+  onPreviewAtSpot,
 }: {
   part: PartDefinition;
   isActive: boolean;
   onSelect: () => void;
   /** Off where the viewport already previews the part in place, which the card would cover */
   hoverPreview?: boolean;
+  /** Ghost this part where it would land, while the pointer is on it */
+  onPreviewAtSpot?: (on: boolean) => void;
 }) {
   const color = PART_COLORS[part.category] || PART_COLORS.custom;
   const { ref, dataURL: thumbnail } = useThumbnail(part);
@@ -133,6 +148,11 @@ function PartButton({
     setCardAt(null);
   }, []);
 
+  const leave = useCallback(() => {
+    closeCard();
+    onPreviewAtSpot?.(false);
+  }, [closeCard, onPreviewAtSpot]);
+
   // A card left behind by an unmounting item (a filter change, a collapsed section)
   useEffect(() => closeCard, [closeCard]);
 
@@ -141,6 +161,9 @@ function PartButton({
   };
 
   const openCardSoon = (e: React.PointerEvent) => {
+    // The ghost is the answer to "where would this go", so it comes at once; the card
+    // is a second look at the part itself, and waits to be asked for
+    onPreviewAtSpot?.(true);
     if (!hoverPreview || e.pointerType === "touch") return;
     trackPointer(e);
     if (timerRef.current !== null) return;
@@ -155,12 +178,12 @@ function PartButton({
       ref={ref}
       className={`catalog-item ${isActive ? "active" : ""}`}
       onClick={() => {
-        closeCard();
+        leave();
         onSelect();
       }}
       onPointerEnter={openCardSoon}
       onPointerMove={trackPointer}
-      onPointerLeave={closeCard}
+      onPointerLeave={leave}
       onPointerDown={closeCard}
       title={hoverPreview ? undefined : part.description}
     >
@@ -200,6 +223,7 @@ export function Sidebar({
   replacement,
   onReplaceConnector,
   inspected,
+  placementsAtPoint,
 }: SidebarProps) {
   const activePlaceId = activeMode.type === "place" ? activeMode.definitionId : null;
 
@@ -244,6 +268,37 @@ export function Sidebar({
       return next;
     });
   }, []);
+
+  /**
+   * A catalog entry. Where the part fits the picked spot, hovering it ghosts the part
+   * at that spot — the same answer the click will act on.
+   */
+  const catalogItem = (part: PartDefinition) => {
+    const spot = placementsAtPoint?.get(part.id);
+    return (
+      <PartButton
+        key={part.id}
+        part={part}
+        isActive={activePlaceId === part.id}
+        onSelect={() => onSelectPart(part.id)}
+        onPreviewAtSpot={
+          spot
+            ? (on) =>
+                onHoverSuggestion(
+                  on
+                    ? {
+                        definitionId: part.id,
+                        position: spot.position,
+                        rotation: spot.rotation,
+                        orientation: spot.orientation,
+                      }
+                    : null,
+                )
+            : undefined
+        }
+      />
+    );
+  };
 
   const query = searchQuery.toLowerCase().trim();
   const isSearching = query.length > 0;
@@ -420,18 +475,7 @@ export function Sidebar({
               {label}
               <span className="catalog-section-count">{parts.length}</span>
             </h2>
-            {!isCollapsed && (
-              <div className="catalog-grid">
-                {parts.map((part) => (
-                  <PartButton
-                    key={part.id}
-                    part={part}
-                    isActive={activePlaceId === part.id}
-                    onSelect={() => onSelectPart(part.id)}
-                  />
-                ))}
-              </div>
-            )}
+            {!isCollapsed && <div className="catalog-grid">{parts.map(catalogItem)}</div>}
           </div>
         );
       })}
@@ -465,18 +509,7 @@ export function Sidebar({
             </h2>
             {!isOtherCollapsed && (
               <>
-                {ungrouped.length > 0 && (
-                  <div className="catalog-grid">
-                    {ungrouped.map((part) => (
-                      <PartButton
-                        key={part.id}
-                        part={part}
-                        isActive={activePlaceId === part.id}
-                        onSelect={() => onSelectPart(part.id)}
-                      />
-                    ))}
-                  </div>
-                )}
+                {ungrouped.length > 0 && <div className="catalog-grid">{ungrouped.map(catalogItem)}</div>}
                 {[...groups.entries()].map(([groupName, parts]) => {
                   const groupKey = `other-group-${groupName}`;
                   const isGroupCollapsed = !forceExpanded && collapsed.has(groupKey);
@@ -487,18 +520,7 @@ export function Sidebar({
                         {groupName}
                         <span className="catalog-section-count">{parts.length}</span>
                       </h3>
-                      {!isGroupCollapsed && (
-                        <div className="catalog-grid">
-                          {parts.map((part) => (
-                            <PartButton
-                              key={part.id}
-                              part={part}
-                              isActive={activePlaceId === part.id}
-                              onSelect={() => onSelectPart(part.id)}
-                            />
-                          ))}
-                        </div>
-                      )}
+                      {!isGroupCollapsed && <div className="catalog-grid">{parts.map(catalogItem)}</div>}
                     </div>
                   );
                 })}
@@ -527,11 +549,7 @@ export function Sidebar({
                   <div className="catalog-grid" style={{ marginBottom: 8 }}>
                     {customParts.map((part) => (
                       <div key={part.id} className="catalog-item-wrapper">
-                        <PartButton
-                          part={part}
-                          isActive={activePlaceId === part.id}
-                          onSelect={() => onSelectPart(part.id)}
-                        />
+                        {catalogItem(part)}
                         <button
                           className="catalog-item-download"
                           title={`Download ${part.name}`}
