@@ -32,6 +32,7 @@ import {
   adaptiveConnectorsFor,
   attachmentPointsOf,
   compatiblePartsAt,
+  freeSpotsOf,
   hookupAxisAt,
   supportHookupIsSound,
   nearestAttachmentPoint,
@@ -1251,6 +1252,20 @@ export function App() {
     // snapshot.parts is in the deps because occupancy decides what still fits
   }, [activePoint, selectedPartIds, snapshot.parts]);
 
+  /**
+   * The sides of a lone selected connector with nothing on them yet, each carrying the
+   * connector it would have to become to reach that way.
+   */
+  const freeSpots = useMemo(() => {
+    if (selectedPartIds.size !== 1) return null;
+    const part = assembly.getPartById([...selectedPartIds][0]);
+    if (!part || getPartDefinition(part.definitionId)?.category !== "connector") return null;
+    const spots = freeSpotsOf(assembly, part);
+    if (spots.length === 0) return null;
+    return { instanceId: part.instanceId, cell: [...part.position] as GridPosition, spots };
+    // snapshot.parts is in the deps because what is attached decides what is free
+  }, [selectedPartIds, snapshot.parts]);
+
   const compatibleDefinitionIds = useMemo(() => {
     if (!filterByPosition || !placementsAtPoint) return null;
     return new Set(placementsAtPoint.keys());
@@ -1299,42 +1314,112 @@ export function App() {
     setSelectedPartIds(new Set());
   }, []);
 
-  const handleDraw = useCallback((anchor: GridPosition, size: [number, number, number]) => {
-    // Same resolution the ghost used, so the part lands where the preview showed it
-    const drawn = resolveDraw(assembly, anchor, size, assembly.gravityEnabled);
-    if (!drawn) return;
-    const { definitionId, orientation, position } = drawn;
-    if (refuseUnsoundHookup(definitionId, position, IDENTITY_ROTATION, orientation)) return;
+  const handleDraw = useCallback(
+    (anchor: GridPosition, size: [number, number, number], held?: boolean) => {
+      // Same resolution the ghost used, so the part lands where the preview showed it.
+      // A bar drawn from a connector's own arm is held by it: gravity has no say.
+      const drawn = resolveDraw(assembly, anchor, size, assembly.gravityEnabled && !held);
+      if (!drawn) return;
+      const { definitionId, orientation, position } = drawn;
 
-    const cmd: Command = {
-      description: `Draw ${definitionId}`,
-      execute() {
-        assembly.addPart(definitionId, position, IDENTITY_ROTATION, orientation);
-      },
-      undo() {
-        const parts = assembly.getAllParts();
-        const match = parts.find(
+      /*
+       * A bar drawn end-on into a connector that has no arm for it: the connector is
+       * what has to change, and it travels with the draw as one command — the gesture
+       * was single, so the undo should be too. This is also what lets a bar be drawn
+       * from a bare side of a connector at all: without it the hookup would be one the
+       * rule below turns away.
+       */
+      const adapted = (
+        assembly.adaptiveEnabled
+          ? adaptiveConnectorsFor(assembly, {
+              instanceId: "",
+              definitionId,
+              position,
+              rotation: IDENTITY_ROTATION,
+              orientation,
+            })
+          : []
+      ).flatMap((adaptation) => {
+        const connector = assembly.getPartById(adaptation.instanceId);
+        if (!connector) return [];
+        return [
+          {
+            before: {
+              definitionId: connector.definitionId,
+              position: [...connector.position] as GridPosition,
+              rotation: [...connector.rotation] as Rotation3,
+              orientation: connector.orientation,
+              color: connector.color,
+            },
+            after: {
+              definitionId: adaptation.definitionId,
+              position: [...adaptation.cell] as GridPosition,
+              rotation: adaptation.rotation,
+              orientation: connector.orientation,
+              color: connector.color,
+            },
+          },
+        ];
+      });
+
+      // A connector about to grow an arm for this bar is what makes the hookup sound;
+      // with none coming, the rule holds
+      if (adapted.length === 0 && refuseUnsoundHookup(definitionId, position, IDENTITY_ROTATION, orientation)) {
+        return;
+      }
+
+      const cmd: Command = {
+        description:
+          adapted.length > 0 ? `Draw ${definitionId} and adapt ${adapted.length} connector(s)` : `Draw ${definitionId}`,
+        execute() {
+          for (const swap of adapted) {
+            removeMatchingParts([swap.before]);
+            assembly.addPart(
+              swap.after.definitionId,
+              swap.after.position,
+              swap.after.rotation,
+              swap.after.orientation,
+              swap.after.color,
+            );
+          }
+          assembly.addPart(definitionId, position, IDENTITY_ROTATION, orientation);
+        },
+        undo() {
+          const parts = assembly.getAllParts();
+          const match = parts.find(
+            (p) =>
+              p.definitionId === definitionId &&
+              p.position[0] === position[0] &&
+              p.position[1] === position[1] &&
+              p.position[2] === position[2],
+          );
+          if (match) assembly.removePart(match.instanceId);
+          for (const swap of adapted) {
+            removeMatchingParts([swap.after]);
+            assembly.addPart(
+              swap.before.definitionId,
+              swap.before.position,
+              swap.before.rotation,
+              swap.before.orientation,
+              swap.before.color,
+            );
+          }
+        },
+      };
+      history.execute(cmd);
+      const match = assembly
+        .getAllParts()
+        .find(
           (p) =>
             p.definitionId === definitionId &&
             p.position[0] === position[0] &&
             p.position[1] === position[1] &&
             p.position[2] === position[2],
         );
-        if (match) assembly.removePart(match.instanceId);
-      },
-    };
-    history.execute(cmd);
-    const match = assembly
-      .getAllParts()
-      .find(
-        (p) =>
-          p.definitionId === definitionId &&
-          p.position[0] === position[0] &&
-          p.position[1] === position[1] &&
-          p.position[2] === position[2],
-      );
-    if (match) setSelectedPartIds(new Set([match.instanceId]));
-  }, [refuseUnsoundHookup]);
+      if (match) setSelectedPartIds(new Set([match.instanceId]));
+    },
+    [refuseUnsoundHookup],
+  );
 
   const handleResizePart = useCallback((instanceId: string, position: GridPosition, size: [number, number, number]) => {
     const part = assembly.getPartById(instanceId);
@@ -1767,6 +1852,9 @@ export function App() {
           onLockedPartDrag={handleLockedPartDrag}
           selectedPoint={activePoint}
           previewSuggestion={previewSuggestion}
+          freeSpots={freeSpots}
+          onGrowConnector={handleReplaceConnector}
+          onPreviewConnector={setPreviewSuggestion}
           onClickEmpty={handleClickEmpty}
           onBoxSelect={handleBoxSelect}
           onNudgeParts={handleNudgeParts}

@@ -23,6 +23,7 @@ import * as THREE from "three";
 import { BASE_UNIT, PART_COLORS, GRID_EXTENT } from "../constants";
 import type {
   PlacedPart,
+  Direction,
   InteractionMode,
   GridPosition,
   Rotation3,
@@ -69,6 +70,7 @@ import {
 import {
   type AttachmentPoint,
   type ConnectorAdaptation,
+  type FreeSpot,
   adaptiveConnectorsFor,
   hookupAxisAt,
   supportHookupIsSound,
@@ -121,7 +123,11 @@ interface ViewportProps {
     rotation: PlacedPart["rotation"],
     orientation?: Axis,
   ) => void;
-  onDraw: (position: GridPosition, size: [number, number, number]) => void;
+  /**
+   * `held` is a draw begun on a connector's own free side: the bar is plugged into
+   * that arm, so gravity has no say over where it ends up.
+   */
+  onDraw: (position: GridPosition, size: [number, number, number], held?: boolean) => void;
   onResizePart: (instanceId: string, position: GridPosition, size: [number, number, number]) => void;
   onMovePart: (
     instanceId: string,
@@ -148,6 +154,14 @@ interface ViewportProps {
     orientation?: Axis;
     replaces?: string;
   } | null;
+  /** The sides of the selected connector with nothing on them yet */
+  freeSpots: { instanceId: string; cell: GridPosition; spots: FreeSpot[] } | null;
+  /** Trade the selected connector for one reaching the way a handle points */
+  onGrowConnector: (instanceId: string, definitionId: string, rotation: Rotation3) => void;
+  /** Ghost a connector where it would stand, or clear the ghost with null */
+  onPreviewConnector: (
+    preview: { definitionId: string; position: GridPosition; rotation: Rotation3; replaces?: string } | null,
+  ) => void;
   onClickEmpty: () => void;
   onDeleteSelected: () => void;
   onPasteParts: (clipboard: ClipboardData, targetPosition: GridPosition, extraRotation?: Rotation3) => void;
@@ -608,6 +622,108 @@ const KEY_COLOR: Record<"X" | "Y" | "Z", string> = { X: "#ff5a5a", Y: "#5aff8f",
 /** The plane each ring draws, named by the axes that span it. */
 const AXIS_RING_PLANE = ["yz", "xz", "xy"];
 
+/** One cell step per direction, for placing a handle just outside the connector. */
+const DIRECTION_STEP: Record<Direction, [number, number, number]> = {
+  "+x": [1, 0, 0],
+  "-x": [-1, 0, 0],
+  "+y": [0, 1, 0],
+  "-y": [0, -1, 0],
+  "+z": [0, 0, 1],
+  "-z": [0, 0, -1],
+};
+
+/**
+ * A handle on every side of the selected connector that is not already serving a bar.
+ *
+ * The two things you can do from a free side are the two the handle offers: trade the
+ * connector for one that reaches that way — a plus, since that is a junction gaining a
+ * branch — or draw a bar from there by dragging, which is the same gesture the draw
+ * tool uses and lands on the same resolver.
+ *
+ * A side whose arm is already there has nothing to trade for, so its handle only draws.
+ */
+function FreeSpotHandles({
+  cell,
+  spots,
+  onGrow,
+  onPreview,
+  onDrawFrom,
+  onCancelDraw,
+}: {
+  cell: GridPosition;
+  spots: FreeSpot[];
+  onGrow: (spot: FreeSpot) => void;
+  onPreview: (spot: FreeSpot | null) => void;
+  onDrawFrom: (spot: FreeSpot) => void;
+  onCancelDraw: () => void;
+}) {
+  /*
+   * A press on a handle is not yet either gesture. The draw starts at once — it has to,
+   * or the first stretch of the drag would be lost while it waited to be sure — and a
+   * release that never travelled cancels it and trades the connector instead.
+   */
+  const press = useRef<{ x: number; y: number; spot: FreeSpot } | null>(null);
+
+  return (
+    <group position={gridToWorld(cell)}>
+      {spots.map((spot) => {
+        const step = DIRECTION_STEP[spot.direction];
+        const grows = !!spot.grow;
+        return (
+          <Html
+            key={spot.direction}
+            position={step.map((u) => u * BASE_UNIT * 0.85) as [number, number, number]}
+            center
+            zIndexRange={[16, 10]}
+            style={{ pointerEvents: "none" }}
+          >
+            <button
+              type="button"
+              className={`free-spot${grows ? " free-spot-grows" : ""}`}
+              style={{ pointerEvents: "auto" }}
+              title={
+                grows
+                  ? `Click to trade this connector for ${spot.grow?.def.name}, reaching ${spot.direction} as well — or drag to draw a bar`
+                  : `Drag to draw a bar ${spot.direction} from this arm`
+              }
+              // R3F listens on an ancestor of this overlay: an unstopped event would
+              // also be raycast into the scene and pick whatever stands behind
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                if (e.button !== 0) return;
+                press.current = { x: e.clientX, y: e.clientY, spot };
+                // The pointer leaves this 22px button almost at once; captured, the
+                // release still arrives here, which is where the two gestures part
+                e.currentTarget.setPointerCapture(e.pointerId);
+                onPreview(null);
+                onDrawFrom(spot);
+              }}
+              onPointerUp={(e) => {
+                const held = press.current;
+                press.current = null;
+                if (!held) return;
+                if (Math.hypot(e.clientX - held.x, e.clientY - held.y) >= DRAG_THRESHOLD) return;
+                /*
+                 * Never travelled: this was a click. Stopping the event here is what
+                 * keeps the draw's own listener on the window from committing the
+                 * one-cell bar the press had begun.
+                 */
+                e.stopPropagation();
+                onCancelDraw();
+                if (held.spot.grow) onGrow(held.spot);
+              }}
+              onPointerEnter={() => onPreview(spot)}
+              onPointerLeave={() => onPreview(null)}
+            >
+              {grows ? "+" : "\u00b7"}
+            </button>
+          </Html>
+        );
+      })}
+    </group>
+  );
+}
+
 /**
  * Which axis each rotation key turns about, from where the camera stands.
  *
@@ -995,21 +1111,23 @@ function previewPart(part: PlacedPart, preview: ResizePreview): PlacedPart {
 }
 
 /**
- * Length of the bar being resized or selected, in cube units and centimetres, and how
- * high off the ground it sits when it is not on it. Pinned to the bar rather than the
- * corner of the screen, so it is where the eye already is.
+ * What the labelled part measures, and where it sits: its length, and — once it is off
+ * the ground — how high its underside and its top face are.
  *
- * The height is the clearance under the part — the same count the height guides tick
- * off below it — because that is the measurement you take to a shelf, not the height
- * of its top edge.
+ * Both ends are given because both are what a shelf is measured by: the clearance
+ * underneath for what goes below it, the top face for what stands on it. The counts in
+ * cells match the ticks the height guides draw below the part, so the number and the
+ * picture agree.
  *
- * pointerEvents stays off: R3F raycasts through the container this sits in, and a
- * label that swallowed clicks would break selecting the part underneath.
+ * Pinned to the part rather than the corner of the screen, so it is where the eye
+ * already is. pointerEvents stays off: R3F raycasts through the container this sits
+ * in, and a label that swallowed clicks would break selecting the part underneath.
  */
 function DimensionLabel({ min, size }: { min: GridPosition; size: [number, number, number] }) {
   const cells = Math.max(size[0], size[1], size[2]);
   const centre = gridToWorld([min[0] + (size[0] - 1) / 2, min[1] + (size[1] - 1) / 2, min[2] + (size[2] - 1) / 2]);
   const reading = (units: number) => `${units}u · ${((units * BASE_UNIT) / 10).toFixed(1)} cm`;
+  const base = min[1];
   return (
     <Html
       position={[centre[0], centre[1] + BASE_UNIT * 0.9, centre[2]]}
@@ -1020,7 +1138,12 @@ function DimensionLabel({ min, size }: { min: GridPosition; size: [number, numbe
       <span className="dimension-label">
         {/* A single cell has no length worth stating; its height still does */}
         {cells > 1 && reading(cells)}
-        {min[1] > 0 && <span className={cells > 1 ? "dimension-label-height" : undefined}>↑ {reading(min[1])}</span>}
+        {base > 0 && (
+          <>
+            <span className={cells > 1 ? "dimension-label-height" : undefined}>base {reading(base)}</span>
+            <span className="dimension-label-height">top {reading(base + size[1])}</span>
+          </>
+        )}
       </span>
     </Html>
   );
@@ -1054,9 +1177,17 @@ function HeightGuides({ min, size }: { min: GridPosition; size: [number, number,
     seg(x1, ground, z1, x1, bottom, z1);
     seg(x0, ground, z1, x0, bottom, z1);
 
-    for (let level = 1; level <= min[1]; level++) {
+    // The corner the ladder runs along carries on to the top face, so the rungs above
+    // the underside have something to hang from
+    const top = (min[1] + size[1]) * u;
+    seg(x0, bottom, z0, x0, top, z0);
+
+    // A rung per grid level, with the two the part actually ends at drawn longer:
+    // those are the underside and the top face, the two heights worth reading off
+    for (let level = 1; level <= min[1] + size[1]; level++) {
       const y = level * u;
-      seg(x0, y, z0, x0 - u * 0.4, y, z0);
+      const isEnd = level === min[1] || level === min[1] + size[1];
+      seg(x0, y, z0, x0 - u * (isEnd ? 0.75 : 0.4), y, z0);
     }
     return new Float32Array(pts);
   }, [min[0], min[1], min[2], size[0], size[1], size[2]]);
@@ -2126,7 +2257,14 @@ function DragPreview({
 
   return (
     <group>
-      {ghostBounds && ghostBounds.min[1] > 0 && <HeightGuides min={ghostBounds.min} size={ghostBounds.size} />}
+      {ghostBounds && ghostBounds.min[1] > 0 && (
+        <>
+          <HeightGuides min={ghostBounds.min} size={ghostBounds.size} />
+          {/* The guides let the height be counted; this says it, which is what you
+              want while the part is still moving */}
+          <DimensionLabel min={ghostBounds.min} size={ghostBounds.size} />
+        </>
+      )}
       <group name="drag-preview" position={worldPos}>
         <Suspense
           fallback={
@@ -2409,8 +2547,12 @@ interface SceneProps extends ViewportProps {
   yLift: number;
   boxSelectActive: boolean;
   collidingPartIds: Set<string>;
-  drawDrag: { start: GridPosition; current: GridPosition } | null;
+  drawDrag: { start: GridPosition; current: GridPosition; axis?: DrawAxis; held?: boolean } | null;
   onDrawPointerDown: (grid: GridPosition) => void;
+  /** Start a draw from a free side of the selected connector, along that side */
+  onDrawFromSpot: (spot: FreeSpot) => void;
+  /** Drop a draw without placing anything — the press turned out to be a click */
+  onCancelDraw: () => void;
   onDrawPointerUp: () => void;
   resizePreview: ResizePreview | null;
   onResizePreview: (preview: ResizePreview | null) => void;
@@ -2463,10 +2605,15 @@ function Scene({
   gravityEnabled,
   selectedPoint,
   previewSuggestion,
+  freeSpots,
+  onGrowConnector,
+  onPreviewConnector,
   boxSelectActive,
   collidingPartIds,
   drawDrag,
   onDrawPointerDown,
+  onDrawFromSpot,
+  onCancelDraw,
   onDrawPointerUp,
   resizePreview,
   onResizePreview,
@@ -2600,11 +2747,11 @@ function Scene({
     return bounds;
   }, [resizePreview, hoveredPartId, parts]);
 
-  const sceneDrawAxis: DrawAxis = mode.type === "draw" ? mode.axis : "horizontal";
+  const sceneDrawAxis: DrawAxis = drawDrag?.axis ?? (mode.type === "draw" ? mode.axis : "horizontal");
   const drawSpan = drawDrag ? computeDrawSpan(drawDrag.start, drawDrag.current, sceneDrawAxis) : null;
   // Preview the settled placement, not the raw span — same resolver as the commit
   const drawPreview = drawSpan
-    ? (resolveDraw(assembly, drawSpan.position, drawSpan.size, gravityEnabled) ?? drawSpan)
+    ? (resolveDraw(assembly, drawSpan.position, drawSpan.size, gravityEnabled && !drawDrag?.held) ?? drawSpan)
     : null;
 
   return (
@@ -2762,6 +2909,28 @@ function Scene({
         <RotationHandles centre={selectionBody.centre} radii={selectionBody.radii} onRotate={onRotateSelectedParts} />
       )}
 
+      {freeSpots && mode.type === "select" && !dragState && (
+        <FreeSpotHandles
+          cell={freeSpots.cell}
+          spots={freeSpots.spots}
+          onGrow={(spot) => spot.grow && onGrowConnector(freeSpots.instanceId, spot.grow.def.id, spot.grow.rotation)}
+          onPreview={(spot) =>
+            onPreviewConnector(
+              spot?.grow
+                ? {
+                    definitionId: spot.grow.def.id,
+                    position: freeSpots.cell,
+                    rotation: spot.grow.rotation,
+                    replaces: freeSpots.instanceId,
+                  }
+                : null,
+            )
+          }
+          onDrawFrom={onDrawFromSpot}
+          onCancelDraw={onCancelDraw}
+        />
+      )}
+
       {selectedResizable && mode.type === "select" && !dragState && (
         <>
           <ResizeHandles
@@ -2775,16 +2944,19 @@ function Scene({
         </>
       )}
 
-      {mode.type === "draw" &&
-        (drawPreview ? (
-          <>
-            <DrawSpanGhost position={drawPreview.position} size={drawPreview.size} />
-            {/* The length while it is still being dragged out, not only once placed */}
-            <DimensionLabel min={drawPreview.position} size={drawPreview.size} />
-          </>
-        ) : (
+      {/* A draw from a connector's free side happens in select mode, so the span is
+          shown whenever one is being dragged out; the cursor cell belongs to the tool */}
+      {drawPreview ? (
+        <>
+          <DrawSpanGhost position={drawPreview.position} size={drawPreview.size} />
+          {/* The length while it is still being dragged out, not only once placed */}
+          <DimensionLabel min={drawPreview.position} size={drawPreview.size} />
+        </>
+      ) : (
+        mode.type === "draw" && (
           <DrawSpanCursor assembly={assembly} gravityEnabled={gravityEnabled} level={workspace.level} />
-        ))}
+        )
+      )}
 
       {/* Ghost preview in placement mode */}
       {mode.type === "place" && (
@@ -2983,7 +3155,14 @@ export function ViewportCanvas(props: ViewportProps) {
     refused?: boolean;
   } | null>(null);
 
-  const [drawDrag, setDrawDrag] = useState<{ start: GridPosition; current: GridPosition } | null>(null);
+  const [drawDrag, setDrawDrag] = useState<{
+    start: GridPosition;
+    current: GridPosition;
+    /** Set when the draw began on a connector's free side, which fixes its axis */
+    axis?: DrawAxis;
+    /** A bar plugged into an arm is held by it, whatever gravity would prefer */
+    held?: boolean;
+  } | null>(null);
   const drawDragRef = useRef(drawDrag);
   drawDragRef.current = drawDrag;
   const [resizePreview, setResizePreview] = useState<ResizePreview | null>(null);
@@ -2992,7 +3171,29 @@ export function ViewportCanvas(props: ViewportProps) {
     setDrawDrag({ start: grid, current: grid });
   }, []);
 
-  const drawAxis: DrawAxis = props.mode.type === "draw" ? props.mode.axis : "horizontal";
+  /**
+   * A draw begun on a free side of the selected connector: it starts in the cell that
+   * side faces, and the side settles whether the bar is drawn out flat or upright.
+   */
+  const handleDrawFromSpot = useCallback((spot: FreeSpot) => {
+    const axis: DrawAxis = spot.direction[1] === "y" ? "vertical" : "horizontal";
+    const start: GridPosition = [...spot.cell];
+    drawDragRef.current = { start, current: [...start], axis, held: true };
+    setDrawDrag({ start, current: [...start], axis, held: true });
+  }, []);
+
+  /**
+   * Drop the draw without placing anything.
+   *
+   * The ref goes with the state because the commit reads the ref, and both happen
+   * inside the one release: a state change would not have landed in time.
+   */
+  const handleDrawCancel = useCallback(() => {
+    drawDragRef.current = null;
+    setDrawDrag(null);
+  }, []);
+
+  const drawAxis: DrawAxis = drawDrag?.axis ?? (props.mode.type === "draw" ? props.mode.axis : "horizontal");
 
   const handleDrawPointerUp = useCallback(() => {
     const drag = drawDragRef.current;
@@ -3000,7 +3201,7 @@ export function ViewportCanvas(props: ViewportProps) {
     drawDragRef.current = null;
     setDrawDrag(null);
     const { position, size } = computeDrawSpan(drag.start, drag.current, drawAxis);
-    props.onDraw(position, size);
+    props.onDraw(position, size, drag.held);
   }, [props.onDraw, drawAxis]);
 
   // Continue draw tracking even if the pointer leaves the ground mesh
@@ -3694,6 +3895,8 @@ export function ViewportCanvas(props: ViewportProps) {
           collidingPartIds={collidingPartIds}
           drawDrag={drawDrag}
           onDrawPointerDown={handleDrawPointerDown}
+          onDrawFromSpot={handleDrawFromSpot}
+          onCancelDraw={handleDrawCancel}
           onDrawPointerUp={handleDrawPointerUp}
           resizePreview={resizePreview}
           onResizePreview={setResizePreview}

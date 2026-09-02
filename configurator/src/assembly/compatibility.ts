@@ -265,6 +265,60 @@ function connectorsCovering(
   return out;
 }
 
+/** A direction off a connector with nothing plugged into it. */
+export type FreeSpot = {
+  direction: Direction;
+  /** The cell a bar drawn from here would start in */
+  cell: GridPosition;
+  /** Whether the connector already reaches this way */
+  hasArm: boolean;
+  /**
+   * The connector to trade up to in order to gain this arm, or null when it already
+   * has one, or when no catalog connector covers the junction plus this direction.
+   */
+  grow: TopologySuggestion | null;
+};
+
+/**
+ * The six directions off a connector, minus the ones already serving a bar.
+ *
+ * These are the spots something can still be built from: an arm standing idle, or a
+ * face with no arm at all — which is a spot too, since the connector can be traded for
+ * one that reaches that way. `grow` carries that trade, worked out here so the handle
+ * in the viewport only has to offer it.
+ */
+export function freeSpotsOf(assembly: AssemblyState, part: PlacedPart): FreeSpot[] {
+  const def = getPartDefinition(part.definitionId);
+  if (!def || def.category !== "connector") return [];
+
+  const cell: GridPosition = [...part.position];
+  const ignoreIds = new Set([part.instanceId]);
+  const branches = branchDirectionsAt(assembly, cell, ignoreIds);
+  const arms = armDirections(def, part.rotation);
+
+  const out: FreeSpot[] = [];
+  for (const direction of DIRECTIONS) {
+    // A branch is a bar already met this way: that spot is taken, not free
+    if (branches.includes(direction)) continue;
+
+    const hasArm = arms.has(direction);
+    /*
+     * The trade keeps every arm the connector already has and adds this one: those arms
+     * were chosen, and a junction gaining a branch should not quietly lose another.
+     * Branches join them because a bar can meet a cell the connector has no arm for —
+     * that reach has to be kept too.
+     */
+    const wanted = [...new Set<Direction>([...arms, ...branches, direction])];
+    out.push({
+      direction,
+      cell: getAdjacentPosition(cell, direction),
+      hasArm,
+      grow: hasArm ? null : (connectorsCovering(assembly, cell, wanted, ignoreIds, part)[0] ?? null),
+    });
+  }
+  return out;
+}
+
 /** A connector that has to change to suit the bars that will meet it after a drop. */
 export type ConnectorAdaptation = {
   /** The connector standing there now */

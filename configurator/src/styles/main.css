@@ -1422,3 +1422,45 @@
   border-left: 1px solid rgba(247, 182, 0, 0.35);
   opacity: 0.85;
 }
+
+/* A side of the selected connector with nothing on it yet. The plus ones can trade the
+   connector up for one that reaches that way; every one of them draws a bar on a drag. */
+.free-spot {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border-radius: 50%;
+  background: rgba(22, 33, 62, 0.9);
+  border: 2px solid var(--accent);
+  color: var(--accent);
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  opacity: 0.6;
+  transition:
+    transform 90ms ease-out,
+    opacity 90ms ease-out;
+}
+
+/* A side the connector cannot reach yet reads as an offer, not just a marker */
+.free-spot-grows {
+  opacity: 0.9;
+  width: 26px;
+  height: 26px;
+  font-size: 16px;
+}
+
+.free-spot:hover {
+  opacity: 1;
+  transform: scale(1.15);
+}
+
+.free-spot:active {
+  transform: scale(0.94);
+}
