@@ -1160,26 +1160,69 @@ function DimensionLabel({ min, size }: { min: GridPosition; size: [number, numbe
 }
 
 /**
+ * The levels where a flat part's plane meets the box being guided, one per part, so
+ * the ground-parallel axes are drawn where there is something to read them against.
+ *
+ * A flat part lies in a plane; an upright one crosses planes rather than making one,
+ * which is why only the flat ones are asked. Where the crossed part's own plane falls
+ * outside the box — a shelf resting just under the box, or just on top of it — the
+ * axis is drawn at the face they share, which is where the two are to be compared.
+ */
+function crossedPlanesOf(
+  parts: PlacedPart[],
+  min: GridPosition,
+  size: [number, number, number],
+  ignoreIds?: Set<string>,
+): number[] {
+  const top = min[1] + size[1];
+  const levels = new Set<number>();
+  for (const part of parts) {
+    if (ignoreIds?.has(part.instanceId)) continue;
+    const bounds = placedPartBounds(part);
+    if (!bounds) continue;
+    if (bounds.size[1] !== 1 || Math.max(bounds.size[0], bounds.size[2]) < 2) continue;
+    const level = bounds.min[1];
+    // Their heights have to touch at least: a shelf three levels below says nothing
+    // about this part's placement that its own footprint does not already say
+    if (level + 1 < min[1] || level > top) continue;
+    levels.add(Math.min(Math.max(level, min[1]), top));
+  }
+  return [...levels].sort((a, b) => a - b);
+}
+
+/**
  * Guides for a part standing off the ground: its footprint below it, posts down to
  * that footprint, one tick per grid level so the height can be read by counting rather
- * than guessed from perspective, and — in the plane the part's underside sits in —
- * lines running out to the edge of the workspace.
+ * than guessed from perspective, and — in each plane the part shares with a flat part
+ * of the assembly — lines running out to the edge of the workspace.
  *
  * Those flat lines are the same idea as the posts, turned into the other two
  * dimensions: the posts say how high the part is above the ground, and the lines carry
- * its edges out across the assembly, so another part at that height either meets one
- * or plainly does not. Nothing else in perspective tells you that.
+ * its edges out across the assembly, so the part it passes at that height either meets
+ * one or plainly does not. Nothing else in perspective tells you that. They follow the
+ * parts crossed rather than the part's own underside, because a line in a plane where
+ * nothing else stands has nothing to be read against.
  */
 function HeightGuides({
   min,
   size,
   extent,
+  parts,
+  ignoreIds,
 }: {
   min: GridPosition;
   size: [number, number, number];
   /** Half-width of the buildable area, in cells: how far the flat lines reach */
   extent: number;
+  /** The assembly, for the planes the part crosses */
+  parts: PlacedPart[];
+  /** Parts to leave out: the guided part itself, and anything travelling with it */
+  ignoreIds?: Set<string>;
 }) {
+  const planes = useMemo(
+    () => crossedPlanesOf(parts, min, size, ignoreIds),
+    [parts, ignoreIds, min[0], min[1], min[2], size[0], size[1], size[2]],
+  );
   const positions = useMemo(() => {
     const u = BASE_UNIT;
     const x0 = min[0] * u - u / 2;
@@ -1209,15 +1252,26 @@ function HeightGuides({
     seg(x1, bottom, z1, x0, bottom, z1);
     seg(x0, bottom, z1, x0, bottom, z0);
 
-    // Each of its four edges carried on to the edge of the workspace, both ways
-    seg(-reach, bottom, z0, x0, bottom, z0);
-    seg(x1, bottom, z0, reach, bottom, z0);
-    seg(-reach, bottom, z1, x0, bottom, z1);
-    seg(x1, bottom, z1, reach, bottom, z1);
-    seg(x0, bottom, -reach, x0, bottom, z0);
-    seg(x0, bottom, z1, x0, bottom, reach);
-    seg(x1, bottom, -reach, x1, bottom, z0);
-    seg(x1, bottom, z1, x1, bottom, reach);
+    // In each crossed plane, the four edges carried on to the edge of the workspace,
+    // both ways — with the footprint closed up there too, unless that plane is the
+    // underside, which already has one
+    for (const level of planes) {
+      const y = level * u;
+      if (level !== min[1]) {
+        seg(x0, y, z0, x1, y, z0);
+        seg(x1, y, z0, x1, y, z1);
+        seg(x1, y, z1, x0, y, z1);
+        seg(x0, y, z1, x0, y, z0);
+      }
+      seg(-reach, y, z0, x0, y, z0);
+      seg(x1, y, z0, reach, y, z0);
+      seg(-reach, y, z1, x0, y, z1);
+      seg(x1, y, z1, reach, y, z1);
+      seg(x0, y, -reach, x0, y, z0);
+      seg(x0, y, z1, x0, y, reach);
+      seg(x1, y, -reach, x1, y, z0);
+      seg(x1, y, z1, x1, y, reach);
+    }
 
     // The corner the ladder runs along carries on to the top face, so the rungs above
     // the underside have something to hang from
@@ -1232,7 +1286,7 @@ function HeightGuides({
       seg(x0, y, z0, x0 - u * (isEnd ? 0.75 : 0.4), y, z0);
     }
     return new Float32Array(pts);
-  }, [min[0], min[1], min[2], size[0], size[1], size[2], extent]);
+  }, [min[0], min[1], min[2], size[0], size[1], size[2], extent, planes]);
 
   return (
     <lineSegments>
@@ -2210,13 +2264,14 @@ function DragPreview({
   const grabOffsetRef = useRef<[number, number] | null>(null);
   const partWorldY = gridToWorld(dragState.originalPosition)[1];
 
-  // Parts travelling with this drag move as one, so they never block each other
-  const gravityIgnoreIds = useMemo(() => {
-    if (!gravityEnabled) return undefined;
+  // The parts travelling with this drag: they move as one, so they never block each
+  // other, and the ghost's guides read against the assembly they are leaving
+  const movingIds = useMemo(() => {
     const ids = new Set<string>([dragState.instanceId]);
     if (selectedPartIds.has(dragState.instanceId)) for (const id of selectedPartIds) ids.add(id);
     return ids;
-  }, [gravityEnabled, dragState.instanceId, selectedPartIds]);
+  }, [dragState.instanceId, selectedPartIds]);
+  const gravityIgnoreIds = gravityEnabled ? movingIds : undefined;
 
   const { gridPos, effectiveOrientation, isSnapped, isUnsound, def } = useGhostSnap({
     definitionId: dragState.definitionId,
@@ -2312,7 +2367,13 @@ function DragPreview({
     <group>
       {ghostBounds && ghostBounds.min[1] > 0 && (
         <>
-          <HeightGuides min={ghostBounds.min} size={ghostBounds.size} extent={workspaceExtent} />
+          <HeightGuides
+            min={ghostBounds.min}
+            size={ghostBounds.size}
+            extent={workspaceExtent}
+            parts={parts}
+            ignoreIds={movingIds}
+          />
           {/* The guides let the height be counted; this says it, which is what you
               want while the part is still moving */}
           <DimensionLabel min={ghostBounds.min} size={ghostBounds.size} />
@@ -2775,13 +2836,18 @@ function Scene({
 
   // Guides for any selected part that is off the ground
   const heightGuides = useMemo(() => {
-    const out: { id: string; min: GridPosition; size: [number, number, number] }[] = [];
+    const out: {
+      id: string;
+      min: GridPosition;
+      size: [number, number, number];
+      ignore: Set<string>;
+    }[] = [];
     for (const part of parts) {
       if (!selectedPartIds.has(part.instanceId)) continue;
       if (dragState?.instanceId === part.instanceId) continue; // the ghost carries its own
       const bounds = placedPartBounds(part);
       if (!bounds || bounds.min[1] <= 0) continue;
-      out.push({ id: part.instanceId, min: bounds.min, size: bounds.size });
+      out.push({ id: part.instanceId, min: bounds.min, size: bounds.size, ignore: new Set([part.instanceId]) });
     }
     return out;
   }, [parts, selectedPartIds, dragState]);
@@ -2896,7 +2962,14 @@ function Scene({
       {dimensionBox && <DimensionLabel min={dimensionBox.min} size={dimensionBox.size} />}
 
       {heightGuides.map((g) => (
-        <HeightGuides key={g.id} min={g.min} size={g.size} extent={workspace.extent} />
+        <HeightGuides
+          key={g.id}
+          min={g.min}
+          size={g.size}
+          extent={workspace.extent}
+          parts={parts}
+          ignoreIds={g.ignore}
+        />
       ))}
 
       {selectedPoint && <AttachmentMarker point={selectedPoint} />}
