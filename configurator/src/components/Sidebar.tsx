@@ -1,4 +1,4 @@
-import { useState, useSyncExternalStore, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { PART_CATALOG } from "../data/catalog";
 import { PART_COLORS } from "../constants";
 import {
@@ -22,6 +22,7 @@ import type {
 } from "../types";
 import type { TopologySuggestion } from "../assembly/compatibility";
 import { PartInspector } from "./PartInspector";
+import { PartHoverCard } from "./PartHoverCard";
 
 interface SidebarProps {
   onSelectPart: (definitionId: string) => void;
@@ -101,15 +102,67 @@ function getCategoryIcon(category: PartCategory): string {
   }
 }
 
-function PartButton({ part, isActive, onSelect }: { part: PartDefinition; isActive: boolean; onSelect: () => void }) {
+/** The pointer has to settle before the card appears, so sweeping the list stays quiet */
+const HOVER_DELAY = 160;
+
+function PartButton({
+  part,
+  isActive,
+  onSelect,
+  hoverPreview = true,
+}: {
+  part: PartDefinition;
+  isActive: boolean;
+  onSelect: () => void;
+  /** Off where the viewport already previews the part in place, which the card would cover */
+  hoverPreview?: boolean;
+}) {
   const color = PART_COLORS[part.category] || PART_COLORS.custom;
   const { ref, dataURL: thumbnail } = useThumbnail(part);
+
+  const [cardAt, setCardAt] = useState<{ x: number; y: number } | null>(null);
+  // The card opens where the pointer is when the delay elapses, not where it came in
+  const pointerRef = useRef({ x: 0, y: 0 });
+  const timerRef = useRef<number | null>(null);
+
+  const closeCard = useCallback(() => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    setCardAt(null);
+  }, []);
+
+  // A card left behind by an unmounting item (a filter change, a collapsed section)
+  useEffect(() => closeCard, [closeCard]);
+
+  const trackPointer = (e: React.PointerEvent) => {
+    pointerRef.current = { x: e.clientX, y: e.clientY };
+  };
+
+  const openCardSoon = (e: React.PointerEvent) => {
+    if (!hoverPreview || e.pointerType === "touch") return;
+    trackPointer(e);
+    if (timerRef.current !== null) return;
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null;
+      setCardAt(pointerRef.current);
+    }, HOVER_DELAY);
+  };
+
   return (
     <button
       ref={ref}
       className={`catalog-item ${isActive ? "active" : ""}`}
-      onClick={onSelect}
-      title={part.description}
+      onClick={() => {
+        closeCard();
+        onSelect();
+      }}
+      onPointerEnter={openCardSoon}
+      onPointerMove={trackPointer}
+      onPointerLeave={closeCard}
+      onPointerDown={closeCard}
+      title={hoverPreview ? undefined : part.description}
     >
       <div
         className="catalog-item-preview"
@@ -127,6 +180,7 @@ function PartButton({ part, isActive, onSelect }: { part: PartDefinition; isActi
         )}
       </div>
       <span className="catalog-item-name">{part.name}</span>
+      {cardAt && <PartHoverCard part={part} at={cardAt} />}
     </button>
   );
 }
@@ -291,6 +345,7 @@ export function Sidebar({
                   <PartButton
                     part={def}
                     isActive={false}
+                    hoverPreview={false}
                     onSelect={() => onPlaceAtPoint(def.id, topology.cell, rotation)}
                   />
                 </div>
@@ -331,6 +386,7 @@ export function Sidebar({
                   <PartButton
                     part={def}
                     isActive={isCurrent}
+                    hoverPreview={false}
                     onSelect={() => onReplaceConnector(replacement.instanceId, def.id, rotation)}
                   />
                 </div>

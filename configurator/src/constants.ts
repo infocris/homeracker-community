@@ -53,3 +53,17 @@ export const PART_COLORS = {
   custom: "#6b3a7d",
   collision: "#ff0000",
 } as const;
+
+/**
+ * Strength of the lamp put inside the part for the catalog renders (thumbnail and
+ * hover card).
+ *
+ * Lit only from outside, a connector read as a solid block: its bores are in shadow —
+ * that is what makes a hole look like one — so the sockets could not be counted at a
+ * glance. A light at the middle of the body brightens the lining and leaves the shell
+ * alone, since every panel of the shell has its back to it and an unlit face takes
+ * nothing from a light it cannot see. The inside keeps the part's own colour and is
+ * told apart by how light it is. No distance falloff, so a long support and a small
+ * connector come out alike.
+ */
+export const PART_INTERIOR_LIGHT = 2;
