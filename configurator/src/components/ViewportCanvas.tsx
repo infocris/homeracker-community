@@ -2782,6 +2782,19 @@ function Scene({
     return bounds;
   }, [resizePreview, hoveredPartId, parts]);
 
+  /*
+   * Rings round a lone connector are wider than the part and say nothing that can be
+   * acted on: a connector's business is which way its arms point, which the handles on
+   * its free sides and the replacement list both answer. The keys still turn it.
+   */
+  const turnableSelection = useMemo(
+    () =>
+      parts.some(
+        (p) => selectedPartIds.has(p.instanceId) && getPartDefinition(p.definitionId)?.category !== "connector",
+      ),
+    [parts, selectedPartIds],
+  );
+
   const sceneDrawAxis: DrawAxis = drawDrag?.axis ?? (mode.type === "draw" ? mode.axis : "horizontal");
   const drawSpan = drawDrag ? computeDrawSpan(drawDrag.start, drawDrag.current, sceneDrawAxis) : null;
   // Preview the settled placement, not the raw span — same resolver as the commit
@@ -2940,7 +2953,7 @@ function Scene({
         );
       })}
 
-      {showRotationGuides && selectionBody && mode.type === "select" && !dragState && (
+      {showRotationGuides && selectionBody && turnableSelection && mode.type === "select" && !dragState && (
         <RotationHandles centre={selectionBody.centre} radii={selectionBody.radii} onRotate={onRotateSelectedParts} />
       )}
 
@@ -3316,6 +3329,13 @@ export function ViewportCanvas(props: ViewportProps) {
    */
   const fadedPartIds = useMemo(() => {
     const faded = new Set<string>();
+    /*
+     * While the library is proposing a part, nothing is ghosted out of the way: what
+     * has to be judged is how the proposal meets the parts already there, and a
+     * connector at 22% is no help in judging it. The bar being read whole is the point
+     * of the fade, and it stops being the subject the moment a suggestion is hovered.
+     */
+    if (props.previewSuggestion) return faded;
     if (props.selectedPartIds.size === 0) return faded;
 
     const selectedSupports = props.parts.filter(
@@ -3340,7 +3360,7 @@ export function ViewportCanvas(props: ViewportProps) {
       }
     }
     return faded;
-  }, [props.selectedPartIds, props.parts, props.assembly]);
+  }, [props.selectedPartIds, props.parts, props.assembly, props.previewSuggestion]);
 
   /**
    * The pivot of the turn the rings offer, and how far the body reaches around it in
