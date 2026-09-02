@@ -25,6 +25,7 @@ export function targetCellOf(point: AttachmentPoint): GridPosition {
 }
 
 const AXIS_OF: Record<string, Axis> = { x: "x", y: "y", z: "z" };
+const DIRECTIONS: Direction[] = ["+x", "-x", "+y", "-y", "+z", "-z"];
 const STEPS: RotationStep[] = [0, 90, 180, 270];
 
 /** Rotations that turn axis `from` into axis `to`. */
@@ -432,6 +433,89 @@ function connectorThroughPlacement(
     (candidate) => !placementCollides(assembly, def.id, cell, candidate),
   );
   return rotation ? { position: cell, rotation } : null;
+}
+
+/**
+ * Whether a bar placed here meets the connectors around it the way it physically
+ * could: end-on into an arm, or side-on with nothing reaching into it.
+ *
+ * A connector's arm is a peg that goes *inside* the square tube of a support, so it can
+ * only enter the tube's open end, along the tube's own axis. Two placements pretend
+ * otherwise and are what this rules out: a bar whose end butts flat against a
+ * connector face with no arm behind it, and an arm pointing into a bar's flank. Both
+ * look connected on screen and cannot be built.
+ *
+ * Parts in `ignoreIds` count as absent — pass the bar itself when it is being moved.
+ */
+export function supportHookupIsSound(
+  assembly: AssemblyState,
+  definitionId: string,
+  position: GridPosition,
+  rotation: Rotation3,
+  orientation: Axis | undefined,
+  ignoreIds?: Set<string>,
+): boolean {
+  const def = getPartDefinition(definitionId);
+  if (!def || def.category !== "support") return true;
+
+  const axis: Axis = orientation ?? "y";
+  const cells = getWorldCells(rotateGridCells(def.gridCells, rotation), position, axis);
+  const occupied = new Set(cells.map((c) => c.join(",")));
+
+  for (const part of assembly.getAllParts()) {
+    if (ignoreIds?.has(part.instanceId)) continue;
+    const other = getPartDefinition(part.definitionId);
+    if (!other || other.category !== "connector") continue;
+
+    const arms = armDirections(other, part.rotation);
+    for (const cell of getWorldCells(
+      rotateGridCells(other.gridCells, part.rotation),
+      part.position,
+      part.orientation ?? "y",
+    )) {
+      for (const direction of DIRECTIONS) {
+        const facing = getAdjacentPosition(cell, direction);
+        if (!occupied.has(facing.join(","))) continue;
+
+        // The contact runs along the tube: only an arm reaching into it holds
+        if (AXIS_OF[direction[1]] === axis) {
+          if (!arms.has(direction)) return false;
+        } else if (arms.has(direction)) {
+          // An arm across the tube would have to pierce its side
+          return false;
+        }
+      }
+    }
+  }
+  return true;
+}
+
+/**
+ * The axis a bar would have to lie along to take the arm reaching into this cell, or
+ * null when nothing reaches into it.
+ *
+ * This is what lets a bar turn itself to the connection rather than be refused for
+ * arriving the wrong way round.
+ */
+export function hookupAxisAt(assembly: AssemblyState, cell: GridPosition, ignoreIds?: Set<string>): Axis | null {
+  for (const part of assembly.getAllParts()) {
+    if (ignoreIds?.has(part.instanceId)) continue;
+    const def = getPartDefinition(part.definitionId);
+    if (!def || def.category !== "connector") continue;
+
+    const arms = armDirections(def, part.rotation);
+    for (const own of getWorldCells(
+      rotateGridCells(def.gridCells, part.rotation),
+      part.position,
+      part.orientation ?? "y",
+    )) {
+      for (const direction of arms) {
+        const target = getAdjacentPosition(own, direction);
+        if (target[0] === cell[0] && target[1] === cell[1] && target[2] === cell[2]) return AXIS_OF[direction[1]];
+      }
+    }
+  }
+  return null;
 }
 
 /** Where a part goes when it is chosen for a picked spot. */

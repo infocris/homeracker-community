@@ -32,6 +32,8 @@ import {
   adaptiveConnectorsFor,
   attachmentPointsOf,
   compatiblePartsAt,
+  hookupAxisAt,
+  supportHookupIsSound,
   nearestAttachmentPoint,
   branchDirectionsAt,
   placementAtPoint,
@@ -143,6 +145,9 @@ assembly.subscribe(() => {
   topologySuggestionsAt,
   replacementSuggestionsAt,
   adaptiveConnectorsFor,
+  placementAtPoint,
+  supportHookupIsSound,
+  hookupAxisAt,
 };
 (window as any).__gravity = {
   placementCollides,
@@ -387,6 +392,29 @@ export function App() {
     setTimeout(() => setToast(null), 2500);
   }, []);
 
+  /**
+   * Turn away a bar that would meet a connector in a way that cannot be built, and
+   * say so.
+   *
+   * The ghost is already red by the time this fires — this is the same rule at the
+   * gate, for the gestures that do not go through a ghost at all.
+   */
+  const refuseUnsoundHookup = useCallback(
+    (
+      definitionId: string,
+      position: GridPosition,
+      rotation: Rotation3,
+      orientation?: Axis,
+      ignoreIds?: Set<string>,
+    ) => {
+      if (supportHookupIsSound(assembly, definitionId, position, rotation, orientation, ignoreIds)) return false;
+      setToast("A bar only goes into a connector end-on, along an arm");
+      setTimeout(() => setToast(null), 2500);
+      return true;
+    },
+    [],
+  );
+
   const handlePlacePart = useCallback(
     (
       definitionId: string,
@@ -394,6 +422,7 @@ export function App() {
       rotation: PlacedPart["rotation"] = [0, 0, 0],
       orientation?: Axis,
     ) => {
+      if (refuseUnsoundHookup(definitionId, position, rotation, orientation)) return;
       const cmd: Command = {
         description: `Place ${definitionId}`,
         execute() {
@@ -414,7 +443,7 @@ export function App() {
       };
       history.execute(cmd);
     },
-    [],
+    [refuseUnsoundHookup],
   );
 
   const handleDeleteSelected = useCallback(() => {
@@ -463,6 +492,8 @@ export function App() {
         part.rotation[0] === rotation[0] && part.rotation[1] === rotation[1] && part.rotation[2] === rotation[2];
       const sameOrientation = part.orientation === orientation;
       if (samePosition && sameRotation && sameOrientation) return; // No-op
+      // The bar itself counts as absent: it is the one leaving the cells it is in
+      if (refuseUnsoundHookup(part.definitionId, newPosition, rotation, orientation, new Set([instanceId]))) return;
 
       const oldPosition = part.position;
       const oldRotation = part.rotation;
@@ -547,7 +578,7 @@ export function App() {
       const moved = findPlacedPart(definitionId, newPosition);
       if (moved) keepUnlocked([[instanceId, moved.instanceId]]);
     },
-    [keepUnlocked],
+    [keepUnlocked, refuseUnsoundHookup],
   );
 
   const handleMoveSelectedParts = useCallback(
@@ -1273,6 +1304,7 @@ export function App() {
     const drawn = resolveDraw(assembly, anchor, size, assembly.gravityEnabled);
     if (!drawn) return;
     const { definitionId, orientation, position } = drawn;
+    if (refuseUnsoundHookup(definitionId, position, IDENTITY_ROTATION, orientation)) return;
 
     const cmd: Command = {
       description: `Draw ${definitionId}`,
@@ -1302,7 +1334,7 @@ export function App() {
           p.position[2] === position[2],
       );
     if (match) setSelectedPartIds(new Set([match.instanceId]));
-  }, []);
+  }, [refuseUnsoundHookup]);
 
   const handleResizePart = useCallback((instanceId: string, position: GridPosition, size: [number, number, number]) => {
     const part = assembly.getPartById(instanceId);

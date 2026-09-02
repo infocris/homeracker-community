@@ -70,6 +70,8 @@ import {
   type AttachmentPoint,
   type ConnectorAdaptation,
   adaptiveConnectorsFor,
+  hookupAxisAt,
+  supportHookupIsSound,
   targetCellOf,
 } from "../assembly/compatibility";
 import { settleWithGravity, restOnCollision, placementIsGrounded } from "../assembly/gravity";
@@ -1481,26 +1483,54 @@ function GhostModel({
   rotation,
   orientation,
   isSnapped,
+  isUnsound,
 }: {
   definitionId: string;
   rotation: Rotation3;
   orientation?: Axis;
   isSnapped?: boolean;
+  /** Red: this is a hookup that cannot be built, and the click will refuse it */
+  isUnsound?: boolean;
 }) {
   const def = getPartDefinition(definitionId);
   if (!def) return null;
 
   if (!def.modelPath) {
-    return <GhostFallback definitionId={definitionId} orientation={orientation} isSnapped={isSnapped} />;
+    return (
+      <GhostFallback
+        definitionId={definitionId}
+        orientation={orientation}
+        isSnapped={isSnapped}
+        isUnsound={isUnsound}
+      />
+    );
   }
 
   if (isCustomPart(definitionId)) {
-    return <CustomGhostModel definitionId={definitionId} rotation={rotation} isSnapped={isSnapped} />;
+    return (
+      <CustomGhostModel definitionId={definitionId} rotation={rotation} isSnapped={isSnapped} isUnsound={isUnsound} />
+    );
   }
 
   return (
-    <GLBGhostModel definitionId={definitionId} rotation={rotation} orientation={orientation} isSnapped={isSnapped} />
+    <GLBGhostModel
+      definitionId={definitionId}
+      rotation={rotation}
+      orientation={orientation}
+      isSnapped={isSnapped}
+      isUnsound={isUnsound}
+    />
   );
+}
+
+/**
+ * A ghost is green where it stands, cyan when a socket has taken it, and red when the
+ * hookup it shows cannot be built — the last is the click telling you in advance that
+ * it will refuse.
+ */
+function ghostColor(isSnapped?: boolean, isUnsound?: boolean): string {
+  if (isUnsound) return PART_COLORS.ghost_invalid;
+  return isSnapped ? PART_COLORS.ghost_snapped : PART_COLORS.ghost_valid;
 }
 
 /** Ghost preview for GLB-based parts */
@@ -1509,17 +1539,19 @@ function GLBGhostModel({
   rotation,
   orientation,
   isSnapped,
+  isUnsound,
 }: {
   definitionId: string;
   rotation: Rotation3;
   orientation?: Axis;
   isSnapped?: boolean;
+  isUnsound?: boolean;
 }) {
   const def = getPartDefinition(definitionId)!;
   const { scene } = useGLTF(def.modelPath);
   const cloned = useMemo(() => scene.clone(), [scene]);
   const groupRef = useRef<THREE.Group>(null);
-  const color = isSnapped ? PART_COLORS.ghost_snapped : PART_COLORS.ghost_valid;
+  const color = ghostColor(isSnapped, isUnsound);
 
   useEffect(() => {
     if (!groupRef.current) return;
@@ -1559,16 +1591,18 @@ function CustomGhostModel({
   definitionId,
   rotation,
   isSnapped,
+  isUnsound,
 }: {
   definitionId: string;
   rotation: Rotation3;
   isSnapped?: boolean;
+  isUnsound?: boolean;
 }) {
   const def = getPartDefinition(definitionId)!;
   const geometry = getCustomPartGeometry(definitionId);
   if (!geometry) return null;
 
-  const color = isSnapped ? PART_COLORS.ghost_snapped : PART_COLORS.ghost_valid;
+  const color = ghostColor(isSnapped, isUnsound);
 
   const euler = degreesToEuler(rotation);
   // Compute offset from rotated cells — placed outside rotation
@@ -1591,10 +1625,12 @@ function GhostFallback({
   definitionId,
   orientation,
   isSnapped,
+  isUnsound,
 }: {
   definitionId: string;
   orientation?: Axis;
   isSnapped?: boolean;
+  isUnsound?: boolean;
 }) {
   const def = getPartDefinition(definitionId);
   if (!def) return null;
@@ -1613,7 +1649,7 @@ function GhostFallback({
   const sizeX = (maxX - minX + 1) * BASE_UNIT;
   const sizeY = (maxY - minY + 1) * BASE_UNIT;
   const sizeZ = (maxZ - minZ + 1) * BASE_UNIT;
-  const color = isSnapped ? PART_COLORS.ghost_snapped : PART_COLORS.ghost_valid;
+  const color = ghostColor(isSnapped, isUnsound);
 
   // No rotation needed — box dimensions already reflect oriented space
   return (
@@ -1699,6 +1735,7 @@ function useGhostSnap({
   const [effectiveOrientation, setEffectiveOrientation] = useState<Axis>(ghostOrientation);
   const [effectiveRotation, setEffectiveRotation] = useState<Rotation3>(ghostRotation);
   const [isSnapped, setIsSnapped] = useState(false);
+  const [isUnsound, setIsUnsound] = useState(false);
   const plane = useMemo(() => new THREE.Plane(new THREE.Vector3(0, 1, 0), -planeY), [planeY]);
   const intersectPoint = useMemo(() => new THREE.Vector3(), []);
 
@@ -1776,6 +1813,9 @@ function useGhostSnap({
       setEffectiveOrientation(orient);
       setEffectiveRotation(snapRotation);
       setIsSnapped(true);
+      setIsUnsound(
+        !supportHookupIsSound(assembly, definitionId, liftedSnapPos, snapRotation, orient, gravityIgnoreIds),
+      );
       if (syncRef)
         syncRef.current = {
           position: resultPos,
@@ -1787,9 +1827,24 @@ function useGhostSnap({
     }
 
     // No snap — use free placement with current orientation/rotation
-    const orient = isSupport ? ghostOrientation : "y";
-    const lift = def ? computeGroundLift(def, ghostRotation, orient) : 0;
+    let orient = isSupport ? ghostOrientation : "y";
+    let lift = def ? computeGroundLift(def, ghostRotation, orient) : 0;
     cursorGrid[1] = lift + yLift;
+
+    /*
+     * A connector arm reaching into this cell settles which way the tube must lie: the
+     * arm goes inside the tube, along its axis, so a bar arriving across it is not a
+     * hookup at all. The bar turns to the connection rather than being refused for
+     * arriving the wrong way round.
+     */
+    if (isSupport && def) {
+      const asked = hookupAxisAt(assembly, cursorGrid, gravityIgnoreIds);
+      if (asked && asked !== orient) {
+        orient = asked;
+        lift = computeGroundLift(def, ghostRotation, orient);
+        cursorGrid[1] = lift + yLift;
+      }
+    }
 
     // Right button held: the footprint freezes and the cursor drives height instead,
     // read off a vertical plane through the part turned to face the camera.
@@ -1838,6 +1893,7 @@ function useGhostSnap({
     setEffectiveRotation(ghostRotation);
     setGridPos(freePos);
     setIsSnapped(false);
+    setIsUnsound(!supportHookupIsSound(assembly, definitionId, freePos, ghostRotation, orient, gravityIgnoreIds));
     if (syncRef)
       syncRef.current = {
         position: freePos,
@@ -1847,7 +1903,7 @@ function useGhostSnap({
       };
   });
 
-  return { gridPos, effectiveOrientation, effectiveRotation, isSnapped, def };
+  return { gridPos, effectiveOrientation, effectiveRotation, isSnapped, isUnsound, def };
 }
 
 /** Ghost preview for placement mode */
@@ -1879,7 +1935,7 @@ function GhostPreview({
   onPlacePart: (definitionId: string, position: GridPosition, rotation: Rotation3, orientation: Axis) => void;
 }) {
   const noParts = useMemo(() => new Set<string>(), []);
-  const { gridPos, effectiveOrientation, effectiveRotation, isSnapped, def } = useGhostSnap({
+  const { gridPos, effectiveOrientation, effectiveRotation, isSnapped, isUnsound, def } = useGhostSnap({
     definitionId,
     assembly,
     ghostOrientation,
@@ -1904,6 +1960,7 @@ function GhostPreview({
     rotation: [...effectiveRotation],
     orientation: effectiveOrientation,
     isSnapped,
+    isUnsound,
   };
 
   const handleGhostClick = (e: any) => {
@@ -1915,12 +1972,17 @@ function GhostPreview({
 
   return (
     <group name="ghost-preview" position={worldPos} onClick={handleGhostClick}>
-      <Suspense fallback={<GhostFallback definitionId={definitionId} orientation={effectiveOrientation} />}>
+      <Suspense
+        fallback={
+          <GhostFallback definitionId={definitionId} orientation={effectiveOrientation} isUnsound={isUnsound} />
+        }
+      >
         <GhostModel
           definitionId={definitionId}
           rotation={effectiveRotation}
           orientation={effectiveOrientation}
           isSnapped={isSnapped}
+          isUnsound={isUnsound}
         />
       </Suspense>
     </group>
@@ -1972,7 +2034,7 @@ function DragPreview({
     return ids;
   }, [gravityEnabled, dragState.instanceId, selectedPartIds]);
 
-  const { gridPos, effectiveOrientation, isSnapped, def } = useGhostSnap({
+  const { gridPos, effectiveOrientation, isSnapped, isUnsound, def } = useGhostSnap({
     definitionId: dragState.definitionId,
     assembly,
     ghostOrientation: dragState.orientation ?? "y",
@@ -2002,6 +2064,7 @@ function DragPreview({
       orientation: effectiveOrientation,
       rotation: [...dragState.rotation],
       isSnapped,
+      isUnsound,
     };
   }, [gridPos, effectiveOrientation, dragState.rotation, dragState.instanceId, dragState.definitionId, isSnapped]);
 
@@ -2065,12 +2128,21 @@ function DragPreview({
     <group>
       {ghostBounds && ghostBounds.min[1] > 0 && <HeightGuides min={ghostBounds.min} size={ghostBounds.size} />}
       <group name="drag-preview" position={worldPos}>
-        <Suspense fallback={<GhostFallback definitionId={dragState.definitionId} orientation={effectiveOrientation} />}>
+        <Suspense
+          fallback={
+            <GhostFallback
+              definitionId={dragState.definitionId}
+              orientation={effectiveOrientation}
+              isUnsound={isUnsound}
+            />
+          }
+        >
           <GhostModel
             definitionId={dragState.definitionId}
             rotation={dragState.rotation}
             orientation={effectiveOrientation}
             isSnapped={isSnapped}
+            isUnsound={isUnsound}
           />
         </Suspense>
       </group>
