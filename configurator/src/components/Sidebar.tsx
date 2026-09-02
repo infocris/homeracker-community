@@ -121,14 +121,11 @@ function PartButton({
   part,
   isActive,
   onSelect,
-  hoverPreview = true,
   onPreviewAtSpot,
 }: {
   part: PartDefinition;
   isActive: boolean;
   onSelect: () => void;
-  /** Off where the viewport already previews the part in place, which the card would cover */
-  hoverPreview?: boolean;
   /** Ghost this part where it would land, while the pointer is on it */
   onPreviewAtSpot?: (on: boolean) => void;
 }) {
@@ -164,7 +161,7 @@ function PartButton({
     // The ghost is the answer to "where would this go", so it comes at once; the card
     // is a second look at the part itself, and waits to be asked for
     onPreviewAtSpot?.(true);
-    if (!hoverPreview || e.pointerType === "touch") return;
+    if (e.pointerType === "touch") return;
     trackPointer(e);
     if (timerRef.current !== null) return;
     timerRef.current = window.setTimeout(() => {
@@ -185,7 +182,6 @@ function PartButton({
       onPointerMove={trackPointer}
       onPointerLeave={leave}
       onPointerDown={closeCard}
-      title={hoverPreview ? undefined : part.description}
     >
       <div
         className="catalog-item-preview"
@@ -393,17 +389,15 @@ export function Sidebar({
           ) : (
             <div className="catalog-grid" onPointerLeave={() => onHoverSuggestion(null)}>
               {topology.suggestions.map(({ def, rotation }) => (
-                <div
+                <PartButton
                   key={def.id}
-                  onPointerEnter={() => onHoverSuggestion({ definitionId: def.id, position: topology.cell, rotation })}
-                >
-                  <PartButton
-                    part={def}
-                    isActive={false}
-                    hoverPreview={false}
-                    onSelect={() => onPlaceAtPoint(def.id, topology.cell, rotation)}
-                  />
-                </div>
+                  part={def}
+                  isActive={false}
+                  onSelect={() => onPlaceAtPoint(def.id, topology.cell, rotation)}
+                  onPreviewAtSpot={(on) =>
+                    onHoverSuggestion(on ? { definitionId: def.id, position: topology.cell, rotation } : null)
+                  }
+                />
               ))}
             </div>
           )}
@@ -423,28 +417,25 @@ export function Sidebar({
               const isCurrent =
                 def.id === replacement.definitionId && rotation.every((step, i) => step === replacement.rotation[i]);
               return (
-                <div
+                <PartButton
                   key={def.id}
-                  onPointerEnter={() =>
+                  part={def}
+                  isActive={isCurrent}
+                  onSelect={() => onReplaceConnector(replacement.instanceId, def.id, rotation)}
+                  // The one already standing there has nothing to ghost: it is the view
+                  onPreviewAtSpot={(on) =>
                     onHoverSuggestion(
-                      isCurrent
-                        ? null
-                        : {
+                      on && !isCurrent
+                        ? {
                             definitionId: def.id,
                             position: replacement.cell,
                             rotation,
                             replaces: replacement.instanceId,
-                          },
+                          }
+                        : null,
                     )
                   }
-                >
-                  <PartButton
-                    part={def}
-                    isActive={isCurrent}
-                    hoverPreview={false}
-                    onSelect={() => onReplaceConnector(replacement.instanceId, def.id, rotation)}
-                  />
-                </div>
+                />
               );
             })}
           </div>

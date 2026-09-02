@@ -1151,10 +1151,25 @@ function DimensionLabel({ min, size }: { min: GridPosition; size: [number, numbe
 
 /**
  * Guides for a part standing off the ground: its footprint below it, posts down to
- * that footprint, and one tick per grid level so the height can be read by counting
- * rather than guessed from perspective.
+ * that footprint, one tick per grid level so the height can be read by counting rather
+ * than guessed from perspective, and — in the plane the part's underside sits in —
+ * lines running out to the edge of the workspace.
+ *
+ * Those flat lines are the same idea as the posts, turned into the other two
+ * dimensions: the posts say how high the part is above the ground, and the lines carry
+ * its edges out across the assembly, so another part at that height either meets one
+ * or plainly does not. Nothing else in perspective tells you that.
  */
-function HeightGuides({ min, size }: { min: GridPosition; size: [number, number, number] }) {
+function HeightGuides({
+  min,
+  size,
+  extent,
+}: {
+  min: GridPosition;
+  size: [number, number, number];
+  /** Half-width of the buildable area, in cells: how far the flat lines reach */
+  extent: number;
+}) {
   const positions = useMemo(() => {
     const u = BASE_UNIT;
     const x0 = min[0] * u - u / 2;
@@ -1163,6 +1178,7 @@ function HeightGuides({ min, size }: { min: GridPosition; size: [number, number,
     const z1 = (min[2] + size[2]) * u - u / 2;
     const bottom = min[1] * u;
     const ground = 0.05; // clear of the grid lines
+    const reach = extent * u + u / 2;
     const pts: number[] = [];
     const seg = (ax: number, ay: number, az: number, bx: number, by: number, bz: number) =>
       pts.push(ax, ay, az, bx, by, bz);
@@ -1177,6 +1193,22 @@ function HeightGuides({ min, size }: { min: GridPosition; size: [number, number,
     seg(x1, ground, z1, x1, bottom, z1);
     seg(x0, ground, z1, x0, bottom, z1);
 
+    // The footprint again, up where the part actually is
+    seg(x0, bottom, z0, x1, bottom, z0);
+    seg(x1, bottom, z0, x1, bottom, z1);
+    seg(x1, bottom, z1, x0, bottom, z1);
+    seg(x0, bottom, z1, x0, bottom, z0);
+
+    // Each of its four edges carried on to the edge of the workspace, both ways
+    seg(-reach, bottom, z0, x0, bottom, z0);
+    seg(x1, bottom, z0, reach, bottom, z0);
+    seg(-reach, bottom, z1, x0, bottom, z1);
+    seg(x1, bottom, z1, reach, bottom, z1);
+    seg(x0, bottom, -reach, x0, bottom, z0);
+    seg(x0, bottom, z1, x0, bottom, reach);
+    seg(x1, bottom, -reach, x1, bottom, z0);
+    seg(x1, bottom, z1, x1, bottom, reach);
+
     // The corner the ladder runs along carries on to the top face, so the rungs above
     // the underside have something to hang from
     const top = (min[1] + size[1]) * u;
@@ -1190,7 +1222,7 @@ function HeightGuides({ min, size }: { min: GridPosition; size: [number, number,
       seg(x0, y, z0, x0 - u * (isEnd ? 0.75 : 0.4), y, z0);
     }
     return new Float32Array(pts);
-  }, [min[0], min[1], min[2], size[0], size[1], size[2]]);
+  }, [min[0], min[1], min[2], size[0], size[1], size[2], extent]);
 
   return (
     <lineSegments>
@@ -2134,6 +2166,7 @@ function DragPreview({
   onAdaptation,
   adaptiveEnabled,
   autoAim,
+  workspaceExtent,
 }: {
   dragState: DragState;
   assembly: AssemblyState;
@@ -2153,6 +2186,8 @@ function DragPreview({
   adaptiveEnabled: boolean;
   /** False once the part has been turned by hand: the snap stops aiming it */
   autoAim: boolean;
+  /** Half-width of the buildable area, for the guides the ghost carries */
+  workspaceExtent: number;
 }) {
   const grabOffsetRef = useRef<[number, number] | null>(null);
   const partWorldY = gridToWorld(dragState.originalPosition)[1];
@@ -2259,7 +2294,7 @@ function DragPreview({
     <group>
       {ghostBounds && ghostBounds.min[1] > 0 && (
         <>
-          <HeightGuides min={ghostBounds.min} size={ghostBounds.size} />
+          <HeightGuides min={ghostBounds.min} size={ghostBounds.size} extent={workspaceExtent} />
           {/* The guides let the height be counted; this says it, which is what you
               want while the part is still moving */}
           <DimensionLabel min={ghostBounds.min} size={ghostBounds.size} />
@@ -2830,7 +2865,7 @@ function Scene({
       {dimensionBox && <DimensionLabel min={dimensionBox.min} size={dimensionBox.size} />}
 
       {heightGuides.map((g) => (
-        <HeightGuides key={g.id} min={g.min} size={g.size} />
+        <HeightGuides key={g.id} min={g.min} size={g.size} extent={workspace.extent} />
       ))}
 
       {selectedPoint && <AttachmentMarker point={selectedPoint} />}
@@ -2990,6 +3025,7 @@ function Scene({
           onAdaptation={onAdaptation}
           adaptiveEnabled={adaptiveEnabled}
           autoAim={autoAim}
+          workspaceExtent={workspace.extent}
         />
       )}
 
