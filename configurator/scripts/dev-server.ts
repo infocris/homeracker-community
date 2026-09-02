@@ -40,6 +40,9 @@ const watcher = watch(SRC_DIR, { recursive: true }, async (_event, filename) => 
   if (ok) console.log("Build complete.");
 });
 
+/** A rebuilt bundle behind a browser cache reads as a change that did not happen */
+const NO_STORE = { "Cache-Control": "no-store" };
+
 // Serve the app
 const PORT = parseInt(process.env.PORT || "3001");
 const server = Bun.serve({
@@ -54,7 +57,7 @@ const server = Bun.serve({
       const file = Bun.file(distPath);
       if (await file.exists()) {
         return new Response(file, {
-          headers: { "Content-Type": "application/javascript" },
+          headers: { "Content-Type": "application/javascript", ...NO_STORE },
         });
       }
     }
@@ -65,21 +68,21 @@ const server = Bun.serve({
       const publicPath = join(PUBLIC_DIR, pathname);
       const publicFile = Bun.file(publicPath);
       if (await publicFile.exists()) {
-        return new Response(publicFile);
+        return new Response(publicFile, { headers: NO_STORE });
       }
 
       // Try project root (for styles, etc.)
       const rootPath = join(PROJECT_ROOT, pathname);
       const rootFile = Bun.file(rootPath);
       if (await rootFile.exists()) {
-        return new Response(rootFile);
+        return new Response(rootFile, { headers: NO_STORE });
       }
 
       // Try dist/ directory
       const distPath = join(DIST_DIR, pathname);
       const distFile = Bun.file(distPath);
       if (await distFile.exists()) {
-        return new Response(distFile);
+        return new Response(distFile, { headers: NO_STORE });
       }
     }
 
@@ -92,7 +95,7 @@ const server = Bun.serve({
       '<script type="module" src="/src/main.js"></script>',
     );
     return new Response(rewritten, {
-      headers: { "Content-Type": "text/html" },
+      headers: { "Content-Type": "text/html", ...NO_STORE },
     });
   },
 });
