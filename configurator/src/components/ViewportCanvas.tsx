@@ -600,17 +600,27 @@ function SuggestionPreview({
   position,
   rotation,
   orientation,
+  solid,
 }: {
   definitionId: string;
   position: GridPosition;
   rotation: Rotation3;
   /** A bar lies along an axis; without this it would be ghosted standing up */
   orientation?: Axis;
+  /**
+   * Show the part as it would be built rather than as a ghost.
+   *
+   * For a swap that is the truthful preview: the connector standing there steps aside
+   * for this one, and something *is* on that cell either way — a see-through stand-in
+   * made the junction look like it had gone missing. A ghost is for a part that is not
+   * there yet.
+   */
+  solid?: boolean;
 }) {
   return (
     <group position={gridToWorld(position)}>
       <Suspense fallback={<GhostFallback definitionId={definitionId} orientation={orientation} isSnapped />}>
-        <GhostModel definitionId={definitionId} rotation={rotation} orientation={orientation} isSnapped />
+        <GhostModel definitionId={definitionId} rotation={rotation} orientation={orientation} isSnapped solid={solid} />
       </Suspense>
     </group>
   );
@@ -1647,6 +1657,7 @@ function GhostModel({
   orientation,
   isSnapped,
   isUnsound,
+  solid,
 }: {
   definitionId: string;
   rotation: Rotation3;
@@ -1654,6 +1665,8 @@ function GhostModel({
   isSnapped?: boolean;
   /** Red: this is a hookup that cannot be built, and the click will refuse it */
   isUnsound?: boolean;
+  /** Leave the model its own materials: this is a preview of the built part */
+  solid?: boolean;
 }) {
   const def = getPartDefinition(definitionId);
   if (!def) return null;
@@ -1682,6 +1695,7 @@ function GhostModel({
       orientation={orientation}
       isSnapped={isSnapped}
       isUnsound={isUnsound}
+      solid={solid}
     />
   );
 }
@@ -1703,12 +1717,14 @@ function GLBGhostModel({
   orientation,
   isSnapped,
   isUnsound,
+  solid,
 }: {
   definitionId: string;
   rotation: Rotation3;
   orientation?: Axis;
   isSnapped?: boolean;
   isUnsound?: boolean;
+  solid?: boolean;
 }) {
   const def = getPartDefinition(definitionId)!;
   const { scene } = useGLTF(def.modelPath);
@@ -1717,7 +1733,9 @@ function GLBGhostModel({
   const color = ghostColor(isSnapped, isUnsound);
 
   useEffect(() => {
-    if (!groupRef.current) return;
+    // Solid: the clone keeps the materials the model came with, which is what a placed
+    // part is drawn in
+    if (!groupRef.current || solid) return;
     groupRef.current.traverse((child) => {
       if (child instanceof THREE.Mesh) {
         child.material = new THREE.MeshStandardMaterial({
@@ -1728,7 +1746,7 @@ function GLBGhostModel({
         });
       }
     });
-  }, [color]);
+  }, [color, solid]);
 
   const euler = degreesToEuler(rotation);
   const orient = orientation ?? "y";
@@ -2888,6 +2906,7 @@ function Scene({
           position={previewSuggestion.position}
           rotation={previewSuggestion.rotation}
           orientation={previewSuggestion.orientation}
+          solid={!!previewSuggestion.replaces}
         />
       )}
       {adaptations.map((a) => (
