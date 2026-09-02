@@ -1123,6 +1123,14 @@ export function App() {
     // snapshot.parts is in the deps because the branches depend on what is placed
   }, [activePoint, snapshot.parts]);
 
+  /**
+   * Whether the pointer is in the library.
+   *
+   * The handles on a selected connector are for building from it; while the library is
+   * the thing being read, they only stand in front of what it is proposing.
+   */
+  const [libraryHovered, setLibraryHovered] = useState(false);
+
   /** Suggestion under the cursor in the sidebar, ghosted at its spot */
   const [previewSuggestion, setPreviewSuggestion] = useState<{
     definitionId: string;
@@ -1795,6 +1803,7 @@ export function App() {
     <div className="app">
       <Sidebar
         onSelectPart={handleSelectPart}
+        onHoverChange={setLibraryHovered}
         placementsAtPoint={placementsAtPoint}
         activeMode={mode}
         usedDefinitionIds={new Set(snapshot.parts.map((p) => p.definitionId))}
@@ -1852,7 +1861,7 @@ export function App() {
           onLockedPartDrag={handleLockedPartDrag}
           selectedPoint={activePoint}
           previewSuggestion={previewSuggestion}
-          freeSpots={freeSpots}
+          freeSpots={libraryHovered ? null : freeSpots}
           onGrowConnector={handleReplaceConnector}
           onPreviewConnector={setPreviewSuggestion}
           onClickEmpty={handleClickEmpty}

@@ -65,6 +65,8 @@ interface SidebarProps {
    * the ghost under the pointer; the click itself is resolved the same way upstream.
    */
   placementsAtPoint: Map<string, PointPlacement> | null;
+  /** True while the pointer is in the library, which quiets the handles in the scene */
+  onHoverChange: (inside: boolean) => void;
 }
 
 const SECTIONS: {
@@ -220,6 +222,7 @@ export function Sidebar({
   onReplaceConnector,
   inspected,
   placementsAtPoint,
+  onHoverChange,
 }: SidebarProps) {
   const activePlaceId = activeMode.type === "place" ? activeMode.definitionId : null;
 
@@ -310,7 +313,7 @@ export function Sidebar({
   const forceExpanded = isSearching || !!compatibleDefinitionIds;
 
   return (
-    <div className="sidebar">
+    <div className="sidebar" onPointerEnter={() => onHoverChange(true)} onPointerLeave={() => onHoverChange(false)}>
       <div className="sidebar-header">
         <h1>HomeRacker Configurator</h1>
         <div className="sidebar-subtitle sidebar-links">
