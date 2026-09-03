@@ -3738,6 +3738,26 @@ export function ViewportCanvas(props: ViewportProps) {
 
   // Box-select (marquee) state
   const boxSelectRef = useRef<{ startX: number; startY: number } | null>(null);
+  /**
+   * A box-select gesture is under way — set on the press that begins it, not on the
+   * first pixel of the rectangle.
+   *
+   * The camera has to be called off at the press. Waiting for the rectangle to appear
+   * left the view turning for the few pixels the drag takes to pass the threshold,
+   * which is a wobble on every box drawn. Kept in a ref beside the state because the
+   * window listeners read it from a closure that outlives the render.
+   */
+  const boxGestureRef = useRef(false);
+  const [boxGesture, setBoxGesture] = useState(false);
+  const beginBoxGesture = useCallback((start: { startX: number; startY: number }) => {
+    boxSelectRef.current ??= start;
+    boxGestureRef.current = true;
+    setBoxGesture(true);
+  }, []);
+  const endBoxGesture = useCallback(() => {
+    boxGestureRef.current = false;
+    setBoxGesture(false);
+  }, []);
   const [boxSelectRect, setBoxSelectRect] = useState<{
     x1: number;
     y1: number;
@@ -3954,10 +3974,14 @@ export function ViewportCanvas(props: ViewportProps) {
         }
         boxSelectRef.current = null;
         setBoxSelectRect(null);
+        // Only once nothing is held: handing the view back while the other button of
+        // a two-button box is still down would let it move on the way up
+        if (e.buttons === 0) endBoxGesture();
         return;
       }
 
       middlePressRef.current = null;
+      if (boxGestureRef.current && e.buttons === 0) endBoxGesture();
 
       // Part drag/click finalize
       const pending = pendingDragRef.current;
@@ -4166,7 +4190,7 @@ export function ViewportCanvas(props: ViewportProps) {
       if (bothButtons && props.mode.type === "select" && !dragState) {
         pendingDragRef.current = null;
         rightPressRef.current = null;
-        boxSelectRef.current ??= { startX: e.clientX, startY: e.clientY };
+        beginBoxGesture({ startX: e.clientX, startY: e.clientY });
         return;
       }
 
@@ -4180,9 +4204,9 @@ export function ViewportCanvas(props: ViewportProps) {
       if (!e.shiftKey) return;
       // If a part was clicked, pendingDragRef is already set — don't start box select
       if (pendingDragRef.current) return;
-      boxSelectRef.current = { startX: e.clientX, startY: e.clientY };
+      beginBoxGesture({ startX: e.clientX, startY: e.clientY });
     },
-    [props.mode, dragState],
+    [props.mode, dragState, beginBoxGesture],
   );
 
   /**
@@ -4277,7 +4301,7 @@ export function ViewportCanvas(props: ViewportProps) {
           onHoverPart={setHoveredPartId}
           light={light}
           yLift={yLift}
-          boxSelectActive={!!boxSelectRect}
+          boxSelectActive={!!boxSelectRect || boxGesture}
           collidingPartIds={collidingPartIds}
           drawDrag={drawDrag}
           onDrawPointerDown={handleDrawPointerDown}
