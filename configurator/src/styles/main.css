@@ -1387,6 +1387,68 @@
   color: #1a1a2e;
 }
 
+.mouse-glyph {
+  /* The outline and the dividers; a button in use is filled with the accent */
+  color: var(--text-secondary);
+  justify-self: center;
+}
+
+/* The gestures on the left, one mouse on the right answering the hand */
+.keybindings-mouse {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.keybindings-mouse-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.keybindings-gesture {
+  display: block;
+  width: 100%;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  padding: 3px 4px;
+  font-family: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.keybindings-gesture:hover {
+  border-color: var(--border);
+}
+
+.keybindings-gesture--lit {
+  border-color: var(--accent);
+  background: rgba(247, 182, 0, 0.08);
+}
+
+.keybindings-mouse-figure {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 120px;
+  padding: 10px 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  position: sticky;
+  top: 0;
+}
+
+.keybindings-mouse-caption {
+  font-size: 10px;
+  line-height: 1.3;
+  text-align: center;
+  color: var(--accent);
+}
+
 .keybindings-reset {
   width: 24px;
   height: 24px;

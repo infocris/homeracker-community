@@ -95,14 +95,20 @@ test.describe("Shortcuts", () => {
     await page.waitForSelector(".keybindings");
 
     const rows = await page.evaluate(() => ({
-      shown: document.querySelectorAll(".keybindings-row").length,
+      // One key chip per action; the rows below them are mouse gestures, which have
+      // no keys to show
+      shown: document.querySelectorAll(".keybindings-key").length,
       actions: (window as any).__keys.ACTIONS.length,
+      gestures:
+        document.querySelectorAll(".keybindings-row").length - document.querySelectorAll(".keybindings-key").length,
       undo: [...document.querySelectorAll(".keybindings-row")]
         .find((r) => r.querySelector(".keybindings-label")?.textContent === "Undo")
         ?.querySelector(".keybindings-key")?.textContent,
     }));
     expect(rows.shown).toBe(rows.actions);
     expect(rows.undo).toMatch(/Z$/);
+    // The mouse gestures are listed here too — they have nowhere else to be announced
+    expect(rows.gestures).toBeGreaterThan(0);
 
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => !document.querySelector(".keybindings"));

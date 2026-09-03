@@ -4150,6 +4150,26 @@ export function ViewportCanvas(props: ViewportProps) {
       // end of a camera drag, which the browser reports as a click all the same
       pressOriginRef.current = { x: e.clientX, y: e.clientY };
 
+      /*
+       * Both buttons held at once: the other way to drag a selection box, for hands
+       * that would rather not hold Shift. Anywhere in the viewport, over a part as
+       * readily as over bare ground — an assembly of any size leaves little bare
+       * ground to start on, which is where it was wanted in the first place.
+       *
+       * Two presses are called off here. The one that had begun on a part, so its
+       * release neither selects nor moves it; and the right press, whose release would
+       * otherwise deselect everything the box had just caught. A part already on the
+       * move keeps its drag: there the right button means height, and the chord has
+       * been that gesture's second half for longer.
+       */
+      const bothButtons = (e.buttons & 1) !== 0 && (e.buttons & 2) !== 0;
+      if (bothButtons && props.mode.type === "select" && !dragState) {
+        pendingDragRef.current = null;
+        rightPressRef.current = null;
+        boxSelectRef.current ??= { startX: e.clientX, startY: e.clientY };
+        return;
+      }
+
       if (e.button === 2) {
         // A right press that landed on a part starts a height drag, so it must not
         // also register as the click that cancels or deselects
@@ -4162,7 +4182,7 @@ export function ViewportCanvas(props: ViewportProps) {
       if (pendingDragRef.current) return;
       boxSelectRef.current = { startX: e.clientX, startY: e.clientY };
     },
-    [props.mode],
+    [props.mode, dragState],
   );
 
   /**
