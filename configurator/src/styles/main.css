@@ -997,6 +997,46 @@
     border-bottom: none;
   }
 
+  /* Group / ungroup, next to the colours: both act on the whole selection */
+  .group-actions {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 8px;
+  }
+
+  .group-btn {
+    flex: 1;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    color: var(--text-primary);
+    padding: 5px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    cursor: pointer;
+  }
+
+  .group-btn:hover:not(:disabled) {
+    background: var(--accent-blue);
+  }
+
+  .group-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+
+  .group-note {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    font-size: 11px;
+    color: var(--accent);
+    margin-bottom: 10px;
+  }
+
+  .group-note-hint {
+    color: var(--text-secondary);
+  }
+
   /* Color Picker */
   .color-picker {
     margin-bottom: 12px;

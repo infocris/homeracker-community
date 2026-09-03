@@ -58,6 +58,11 @@ export interface PlacedPart {
   orientation?: Axis;
   /** Optional color override (hex string, e.g. "#ff0000"). undefined = use category default. */
   color?: string;
+  /**
+   * Parts sharing a group id are handled as one body: selecting any of them selects
+   * them all, and they move, turn and go together from then on.
+   */
+  groupId?: string;
 }
 
 /** A part in the clipboard, with position relative to selection center */
@@ -67,6 +72,8 @@ export interface ClipboardPart {
   rotation: Rotation3;
   orientation?: Axis;
   color?: string;
+  /** The group it was in, so a copied group is pasted as a group of its own */
+  groupId?: string;
 }
 
 /** Clipboard data for copy/paste */
@@ -121,6 +128,8 @@ export interface AssemblyFile {
     rotation: [number, number, number];
     orientation?: Axis;
     color?: string;
+    /** Group tag — parts sharing one were grouped by hand */
+    group?: string;
   }>;
   /** Embedded custom part binaries for portability */
   customParts?: EmbeddedCustomPart[];

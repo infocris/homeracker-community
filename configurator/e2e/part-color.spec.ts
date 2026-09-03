@@ -58,7 +58,7 @@ test.describe("Part color", () => {
 
   test("color preserved when added via addPart parameter", async ({ appPage: page }) => {
     const id = await page.evaluate(() =>
-      (window as any).__assembly.addPart("support-3u", [0, 0, 0], [0, 0, 0], undefined, "#abcdef"),
+      (window as any).__assembly.addPart("support-3u", [0, 0, 0], [0, 0, 0], undefined, { color: "#abcdef" }),
     );
 
     const color = await page.evaluate(([id]) => (window as any).__assembly.getPartById(id)?.color, [id]);

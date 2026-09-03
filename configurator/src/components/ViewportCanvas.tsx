@@ -138,7 +138,8 @@ interface ViewportProps {
     adaptations?: ConnectorAdaptation[],
   ) => void;
   onMoveSelectedParts: (primaryId: string, newPosition: GridPosition, rotation?: Rotation3, orientation?: Axis) => void;
-  onClickPart: (instanceId: string, shiftKey: boolean, gridPoint?: GridPosition) => void;
+  /** `solo` asks for the one part hit rather than the group it belongs to */
+  onClickPart: (instanceId: string, shiftKey: boolean, gridPoint?: GridPosition, solo?: boolean) => void;
   /** The cell the coming turn pivots about, so the rings show what will happen */
   rotationPivot: GridPosition | null;
   /** Parts held in place — selectable and clickable, but not draggable */
@@ -1298,6 +1299,76 @@ function HeightGuides({
   );
 }
 
+/**
+ * A box round every part of a group.
+ *
+ * Grouping is otherwise invisible: nothing about a bar says that clicking it will take
+ * five. Drawn for the groups the selection is in and for the one under the pointer, so
+ * what is tied to what can be read by moving the mouse over the assembly.
+ */
+function GroupOutline({ min, max }: { min: GridPosition; max: GridPosition }) {
+  const lines = useRef<THREE.LineSegments>(null);
+  const positions = useMemo(() => {
+    const u = BASE_UNIT;
+    const m = u * 0.12; // clear of the parts themselves, so the box does not z-fight
+    const x0 = min[0] * u - u / 2 - m;
+    const x1 = (max[0] + 1) * u - u / 2 + m;
+    const y0 = min[1] * u - m;
+    const y1 = (max[1] + 1) * u + m;
+    const z0 = min[2] * u - u / 2 - m;
+    const z1 = (max[2] + 1) * u - u / 2 + m;
+    const corners: [number, number, number][] = [
+      [x0, y0, z0],
+      [x1, y0, z0],
+      [x1, y0, z1],
+      [x0, y0, z1],
+      [x0, y1, z0],
+      [x1, y1, z0],
+      [x1, y1, z1],
+      [x0, y1, z1],
+    ];
+    const edges = [
+      [0, 1],
+      [1, 2],
+      [2, 3],
+      [3, 0],
+      [4, 5],
+      [5, 6],
+      [6, 7],
+      [7, 4],
+      [0, 4],
+      [1, 5],
+      [2, 6],
+      [3, 7],
+    ];
+    const pts: number[] = [];
+    for (const [a, b] of edges) pts.push(...corners[a], ...corners[b]);
+    return new Float32Array(pts);
+  }, [min[0], min[1], min[2], max[0], max[1], max[2]]);
+
+  // Dashes are what a dashed material measures along, and they are not there until
+  // asked for; without this the box comes out solid, like the height guides
+  useEffect(() => {
+    lines.current?.computeLineDistances();
+  }, [positions]);
+
+  return (
+    <lineSegments ref={lines}>
+      <bufferGeometry>
+        <bufferAttribute attach="attributes-position" args={[positions, 3]} />
+      </bufferGeometry>
+      <lineDashedMaterial
+        color={PART_COLORS.selected}
+        dashSize={BASE_UNIT * 0.45}
+        gapSize={BASE_UNIT * 0.3}
+        transparent
+        opacity={0.85}
+        depthWrite={false}
+      />
+    </lineSegments>
+  );
+}
+
 /** Outline of the buildable area, so its edge is visible rather than a mystery wall */
 function WorkspaceBounds({ extent }: { extent: number }) {
   const points = useMemo(() => {
@@ -2264,13 +2335,20 @@ function DragPreview({
   const grabOffsetRef = useRef<[number, number] | null>(null);
   const partWorldY = gridToWorld(dragState.originalPosition)[1];
 
-  // The parts travelling with this drag: they move as one, so they never block each
-  // other, and the ghost's guides read against the assembly they are leaving
+  /*
+   * The parts travelling with this drag: they move as one, so they never block each
+   * other, and the ghost's guides read against the assembly they are leaving.
+   *
+   * A group comes along whether or not it was selected first — a press-and-drag in one
+   * gesture never went through a click — so it is asked of the assembly rather than of
+   * the selection alone. The drop does the same, from the other end.
+   */
   const movingIds = useMemo(() => {
     const ids = new Set<string>([dragState.instanceId]);
     if (selectedPartIds.has(dragState.instanceId)) for (const id of selectedPartIds) ids.add(id);
+    else for (const id of assembly.expandToGroups([dragState.instanceId])) ids.add(id);
     return ids;
-  }, [dragState.instanceId, selectedPartIds]);
+  }, [assembly, dragState.instanceId, selectedPartIds]);
   const gravityIgnoreIds = gravityEnabled ? movingIds : undefined;
 
   const { gridPos, effectiveOrientation, isSnapped, isUnsound, def } = useGhostSnap({
@@ -2355,8 +2433,8 @@ function DragPreview({
     orientation: effectiveOrientation,
   });
 
-  // Compute delta for multi-drag ghost rendering
-  const isMultiDrag = selectedPartIds.size > 1 && selectedPartIds.has(dragState.instanceId);
+  // Ghosts for everything on the move, not only for the part under the pointer
+  const isMultiDrag = movingIds.size > 1;
   const delta: GridPosition = [
     gridPos[0] - dragState.originalPosition[0],
     gridPos[1] - dragState.originalPosition[1],
@@ -2400,7 +2478,7 @@ function DragPreview({
       </group>
       {isMultiDrag &&
         parts
-          .filter((p) => selectedPartIds.has(p.instanceId) && p.instanceId !== dragState.instanceId)
+          .filter((p) => movingIds.has(p.instanceId) && p.instanceId !== dragState.instanceId)
           .map((p) => {
             const offsetPos: GridPosition = [
               p.position[0] + delta[0],
@@ -2852,6 +2930,44 @@ function Scene({
     return out;
   }, [parts, selectedPartIds, dragState]);
 
+  /**
+   * Boxes for the groups the selection is in, and for the group under the pointer.
+   * A group left with a single part is not drawn: there is nothing to tie together.
+   */
+  const groupBoxes = useMemo(() => {
+    const shown = new Set<string>();
+    for (const part of parts) {
+      if (!part.groupId) continue;
+      if (selectedPartIds.has(part.instanceId) || part.instanceId === hoveredPartId) shown.add(part.groupId);
+    }
+    if (shown.size === 0) return [];
+
+    const boxes = new Map<string, { min: GridPosition; max: GridPosition; count: number }>();
+    for (const part of parts) {
+      if (!part.groupId || !shown.has(part.groupId)) continue;
+      const bounds = placedPartBounds(part);
+      if (!bounds) continue;
+      const hi: GridPosition = [
+        bounds.min[0] + bounds.size[0] - 1,
+        bounds.min[1] + bounds.size[1] - 1,
+        bounds.min[2] + bounds.size[2] - 1,
+      ];
+      const box = boxes.get(part.groupId);
+      if (!box) {
+        boxes.set(part.groupId, { min: [...bounds.min] as GridPosition, max: hi, count: 1 });
+        continue;
+      }
+      for (let i = 0; i < 3; i++) {
+        box.min[i] = Math.min(box.min[i], bounds.min[i]);
+        box.max[i] = Math.max(box.max[i], hi[i]);
+      }
+      box.count++;
+    }
+    return [...boxes.entries()]
+      .filter(([, box]) => box.count > 1)
+      .map(([id, box]) => ({ id, min: box.min, max: box.max }));
+  }, [parts, selectedPartIds, hoveredPartId]);
+
   // Live while resizing, otherwise whatever the cursor is over. Only bars get one —
   // "1u" on a connector would be noise.
   const dimensionBox = useMemo(() => {
@@ -2970,6 +3086,10 @@ function Scene({
           parts={parts}
           ignoreIds={g.ignore}
         />
+      ))}
+
+      {groupBoxes.map((box) => (
+        <GroupOutline key={box.id} min={box.min} max={box.max} />
       ))}
 
       {selectedPoint && <AttachmentMarker point={selectedPoint} />}
@@ -3683,7 +3803,9 @@ export function ViewportCanvas(props: ViewportProps) {
         // A locked part keeps its press: the pending entry stays so the release still
         // reads as a click and selects, it just never becomes a drag. Said once, or
         // every further move over the threshold would say it again.
-        if (props.lockedPartIds.has(pending.instanceId)) {
+        // A locked connector inside a group still drags: the whole body goes with it,
+        // so the joint it holds is not being pulled apart
+        if (props.lockedPartIds.has(pending.instanceId) && !props.assembly.getPartById(pending.instanceId)?.groupId) {
           if (!pending.refused) {
             pending.refused = true;
             props.onLockedPartDrag();
@@ -3773,7 +3895,7 @@ export function ViewportCanvas(props: ViewportProps) {
         setDragState(null);
         setAdaptations([]);
       } else {
-        props.onClickPart(pending.instanceId, e.shiftKey, pending.gridPoint);
+        props.onClickPart(pending.instanceId, e.shiftKey, pending.gridPoint, e.altKey);
       }
       pendingDragRef.current = null;
     };

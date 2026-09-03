@@ -63,6 +63,7 @@ export type TurnedPart = {
   rotation: Rotation3;
   orientation?: Axis;
   color?: string;
+  groupId?: string;
 };
 
 /**
@@ -208,6 +209,7 @@ export function rotateBlock(
           rotation,
           orientation,
           color: part.color,
+          groupId: part.groupId,
         };
         break;
       }

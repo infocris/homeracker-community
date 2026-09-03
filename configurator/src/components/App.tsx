@@ -3,7 +3,7 @@ import { ViewportCanvas } from "./ViewportCanvas";
 import { Sidebar } from "./Sidebar";
 import { Toolbar } from "./Toolbar";
 import { BOMPanel } from "./BOMPanel";
-import { AssemblyState } from "../assembly/AssemblyState";
+import { AssemblyState, type PartAttrs } from "../assembly/AssemblyState";
 import { HistoryManager, type Command } from "../assembly/HistoryManager";
 import type {
   InteractionMode,
@@ -84,6 +84,12 @@ function isTextEntry(target: EventTarget | null): boolean {
 const assembly = new AssemblyState();
 const history = new HistoryManager();
 
+let groupSeq = 0;
+/** A tag for a new group. The clock in it keeps it clear of tags read from a file. */
+function newGroupId(): string {
+  return `group-${++groupSeq}-${Date.now()}`;
+}
+
 const STORAGE_KEY = "homeracker-scene";
 const INVENTORY_STORAGE_KEY = "homeracker-inventory";
 
@@ -150,6 +156,10 @@ assembly.subscribe(() => {
   supportHookupIsSound,
   hookupAxisAt,
 };
+(window as any).__groups = {
+  regroupTargets,
+  regroupCommand,
+};
 (window as any).__gravity = {
   placementCollides,
   placementFloor,
@@ -167,17 +177,21 @@ type PartSpec = {
 };
 
 /**
- * Removes one part per spec, matched on what the part is rather than on its id.
+ * The part standing for each spec — one apiece, matched on what the part is rather
+ * than on its id, and null where nothing answers.
  *
  * Ids must not be captured when a command is built. Every move is a remove plus an
  * add, so a part comes back with a fresh id, and an id noted at build time goes stale
  * the moment any neighbouring command in the stack runs. That is what duplicated a
  * part on a second undo: the first undo reissued the id the older command was waiting
  * to remove, so nothing was removed and the old part was added alongside it.
+ *
+ * The answers line up with the specs given, so a command can put back what it noted
+ * about each of them — which group a part was in before it was grouped, say.
  */
-function removeMatchingParts(specs: PartSpec[]): void {
+function findMatchingParts(specs: PartSpec[]): (PlacedPart | null)[] {
   const claimed = new Set<string>();
-  for (const spec of specs) {
+  return specs.map((spec) => {
     const match = assembly.getAllParts().find((p) => {
       if (claimed.has(p.instanceId)) return false;
       if (p.definitionId !== spec.definitionId) return false;
@@ -197,9 +211,16 @@ function removeMatchingParts(specs: PartSpec[]): void {
       if (spec.orientation !== undefined && p.orientation !== spec.orientation) return false;
       return true;
     });
-    if (!match) continue;
+    if (!match) return null;
     claimed.add(match.instanceId);
-    assembly.removePart(match.instanceId);
+    return match;
+  });
+}
+
+/** Removes one part per spec, matched the same way. */
+function removeMatchingParts(specs: PartSpec[]): void {
+  for (const match of findMatchingParts(specs)) {
+    if (match) assembly.removePart(match.instanceId);
   }
 }
 
@@ -240,6 +261,60 @@ function resolveRotationPivot(
   }
   if (!Number.isFinite(min[0])) return null;
   return [0, 1, 2].map((i) => Math.round((min[i] + max[i]) / 2)) as GridPosition;
+}
+
+/** What a group command notes about a part: how to find it again, and where it was. */
+type RegroupTarget = { spec: PartSpec; wasIn?: string };
+
+function regroupTargets(ids: Iterable<string>): RegroupTarget[] {
+  const out: RegroupTarget[] = [];
+  for (const id of ids) {
+    const part = assembly.getPartById(id);
+    if (!part) continue;
+    out.push({
+      spec: {
+        definitionId: part.definitionId,
+        position: part.position,
+        rotation: part.rotation,
+        orientation: part.orientation,
+      },
+      wasIn: part.groupId,
+    });
+  }
+  return out;
+}
+
+/**
+ * One undoable step that puts these parts in `groupId` — or takes them out of the
+ * group they are in, with undefined.
+ *
+ * Undo puts each part back in the group it came from rather than in one group for all
+ * of them: grouping a selection that reached across two groups has two answers to give
+ * back, and giving both is what makes the step reversible.
+ */
+function regroupCommand(members: RegroupTarget[], groupId: string | undefined, description: string): Command {
+  const specs = members.map((m) => m.spec);
+  return {
+    description,
+    execute() {
+      const found = findMatchingParts(specs);
+      assembly.setPartsGroup(
+        found.filter((part): part is PlacedPart => !!part).map((part) => part.instanceId),
+        groupId,
+      );
+    },
+    undo() {
+      const found = findMatchingParts(specs);
+      const byGroup = new Map<string | undefined, string[]>();
+      found.forEach((part, i) => {
+        if (!part) return;
+        const ids = byGroup.get(members[i].wasIn);
+        if (ids) ids.push(part.instanceId);
+        else byGroup.set(members[i].wasIn, [part.instanceId]);
+      });
+      for (const [group, ids] of byGroup) assembly.setPartsGroup(ids, group);
+    },
+  };
 }
 
 /** The part standing at this definition and position — how a moved part's new id is found */
@@ -324,6 +399,8 @@ export function App() {
    */
   const heldPivotRef = useRef<{ ids: string[]; cell: GridPosition } | null>(null);
   const selectedPointRef = useRef<AttachmentPoint | null>(null);
+  /** The selection, for the same dependency-free handlers */
+  const selectedIdsRef = useRef<Set<string>>(new Set());
 
   const lockedPartIds = useMemo(() => {
     const ids = new Set<string>();
@@ -462,13 +539,159 @@ export function App() {
       },
       undo() {
         for (const p of partsToDelete) {
-          assembly.addPart(p.definitionId, p.position, p.rotation, p.orientation, p.color);
+          assembly.addPart(p.definitionId, p.position, p.rotation, p.orientation, p);
         }
       },
     };
     history.execute(cmd);
     setSelectedPartIds(new Set());
   }, [selectedPartIds]);
+
+  /**
+   * Ties the selection into a group: from here on a click on any of its parts takes
+   * the whole of it, and it moves, turns, is coloured and goes as one body.
+   *
+   * The tie is a tag on each part rather than a list of ids kept beside them. A move
+   * is a remove plus an add, so a part is reissued under a new id many times in a
+   * session and a list of ids would soon name parts that no longer exist; a tag rides
+   * along with the part through every one of those moves.
+   */
+  const handleGroupSelected = useCallback(() => {
+    const members = regroupTargets(selectedPartIds);
+    if (members.length < 2) {
+      setToast("Select at least two parts to group them");
+      setTimeout(() => setToast(null), 2500);
+      return;
+    }
+    history.execute(regroupCommand(members, newGroupId(), `Group ${members.length} part(s)`));
+  }, [selectedPartIds]);
+
+  /** Unties the parts of the selection that are in a group. */
+  const handleUngroupSelected = useCallback(() => {
+    const members = regroupTargets(selectedPartIds).filter((m) => m.wasIn !== undefined);
+    if (members.length === 0) return;
+    history.execute(regroupCommand(members, undefined, `Ungroup ${members.length} part(s)`));
+  }, [selectedPartIds]);
+
+  /**
+   * Slides a set of parts as one body, taking the part named as the one the gesture
+   * is holding: it lands where it was put, and the rest follow by the same offset.
+   */
+  const moveParts = useCallback(
+    (
+      ids: Iterable<string>,
+      primaryId: string,
+      newPosition: GridPosition,
+      newRotation?: PlacedPart["rotation"],
+      newOrientation?: Axis,
+    ) => {
+      const primary = assembly.getPartById(primaryId);
+      if (!primary) return;
+
+      const delta: GridPosition = [
+        newPosition[0] - primary.position[0],
+        newPosition[1] - primary.position[1],
+        newPosition[2] - primary.position[2],
+      ];
+      if (delta[0] === 0 && delta[1] === 0 && delta[2] === 0 && !newRotation && !newOrientation) return;
+
+      // Snapshot every part on the move before any of them is lifted
+      const partsToMove: {
+        id: string;
+        def: string;
+        oldPos: GridPosition;
+        oldRot: Rotation3;
+        oldOrient?: Axis;
+        color?: string;
+        groupId?: string;
+        newPos: GridPosition;
+        newRot: Rotation3;
+        newOrient?: Axis;
+      }[] = [];
+      for (const id of ids) {
+        const part = assembly.getPartById(id);
+        if (!part) continue;
+        const isPrimary = id === primaryId;
+        partsToMove.push({
+          id,
+          def: part.definitionId,
+          oldPos: part.position,
+          oldRot: part.rotation,
+          oldOrient: part.orientation,
+          color: part.color,
+          groupId: part.groupId,
+          newPos: isPrimary
+            ? newPosition
+            : [part.position[0] + delta[0], part.position[1] + delta[1], part.position[2] + delta[2]],
+          newRot: isPrimary ? (newRotation ?? part.rotation) : part.rotation,
+          newOrient: isPrimary ? (newOrientation ?? part.orientation) : part.orientation,
+        });
+      }
+
+      /*
+       * Every part travels by the same offset, so the body keeps its shape — but only
+       * the part being held was checked against the buildable area, by the ghost. A
+       * rack dragged by its top shelf therefore put its legs through the floor. The
+       * body is nudged back by however much it takes instead, and left where it was
+       * when no single nudge will do, which means it is bigger than the area itself.
+       */
+      const fix: GridPosition = [0, 0, 0];
+      for (const p of partsToMove) {
+        const def = getPartDefinition(p.def);
+        if (!def) continue;
+        const bounded = clampToWorkspace(rotateGridCells(def.gridCells, p.newRot), p.newPos, p.newOrient);
+        for (let i = 0; i < 3; i++) {
+          const off = bounded[i] - p.newPos[i];
+          if (off === 0) continue;
+          if (off * fix[i] < 0) return; // pushed both ways on one axis: it does not fit
+          fix[i] = off > 0 ? Math.max(fix[i], off) : Math.min(fix[i], off);
+        }
+      }
+      if (fix[0] !== 0 || fix[1] !== 0 || fix[2] !== 0) {
+        for (const p of partsToMove) {
+          p.newPos = [p.newPos[0] + fix[0], p.newPos[1] + fix[1], p.newPos[2] + fix[2]];
+        }
+      }
+
+      const cmd: Command = {
+        description: `Move ${partsToMove.length} part(s)`,
+        execute() {
+          // Remove all first, then re-add at new positions (avoids collision with each other)
+          removeMatchingParts(
+            partsToMove.map((p) => ({
+              definitionId: p.def,
+              position: p.oldPos,
+              rotation: p.oldRot,
+              orientation: p.oldOrient,
+            })),
+          );
+          for (const p of partsToMove) assembly.addPart(p.def, p.newPos, p.newRot, p.newOrient, p);
+        },
+        undo() {
+          // Remove parts at new positions, re-add at old positions
+          const allParts = assembly.getAllParts();
+          for (const p of partsToMove) {
+            const match = allParts.find(
+              (ap) =>
+                ap.definitionId === p.def &&
+                ap.position[0] === p.newPos[0] &&
+                ap.position[1] === p.newPos[1] &&
+                ap.position[2] === p.newPos[2],
+            );
+            if (match) assembly.removePart(match.instanceId);
+          }
+          for (const p of partsToMove) assembly.addPart(p.def, p.oldPos, p.oldRot, p.oldOrient, p);
+        },
+      };
+      history.execute(cmd);
+      keepUnlocked(
+        partsToMove
+          .map((p) => [p.id, findPlacedPart(p.def, p.newPos)?.instanceId] as const)
+          .filter((pair): pair is [string, string] => !!pair[1]),
+      );
+    },
+    [keepUnlocked],
+  );
 
   const handleMovePart = useCallback(
     (
@@ -480,6 +703,22 @@ export function App() {
     ) => {
       const part = assembly.getPartById(instanceId);
       if (!part) return;
+
+      /*
+       * A part in a group is moved with its group, whichever of its parts the gesture
+       * took hold of — unless that part is the whole selection, which is what an
+       * Alt+click says: this one part, and not the group behind it.
+       *
+       * Before the lock, so a group can be dragged by a connector: the joint is not
+       * being pulled apart, it is travelling with everything that meets it.
+       */
+      const soloPick = selectedIdsRef.current.size === 1 && selectedIdsRef.current.has(instanceId);
+      const family = soloPick ? new Set([instanceId]) : assembly.expandToGroups([instanceId]);
+      if (family.size > 1) {
+        moveParts(family, instanceId, newPosition, newRotation, newOrientation);
+        return;
+      }
+
       // The authority on the lock, whichever gesture asked for the move
       if (lockedPartIdsRef.current.has(instanceId)) return;
 
@@ -499,7 +738,8 @@ export function App() {
       const oldPosition = part.position;
       const oldRotation = part.rotation;
       const oldOrientation = part.orientation;
-      const oldColor = part.color;
+      // What the part carries besides its place, for the add that ends every move
+      const attrs: PartAttrs = { color: part.color, groupId: part.groupId };
       const definitionId = part.definitionId;
 
       /*
@@ -518,6 +758,7 @@ export function App() {
               rotation: [...connector.rotation] as Rotation3,
               orientation: connector.orientation,
               color: connector.color,
+              groupId: connector.groupId,
             },
             after: {
               definitionId: adaptation.definitionId,
@@ -525,6 +766,7 @@ export function App() {
               rotation: adaptation.rotation,
               orientation: connector.orientation,
               color: connector.color,
+              groupId: connector.groupId,
             },
           },
         ];
@@ -544,10 +786,10 @@ export function App() {
               swap.after.position,
               swap.after.rotation,
               swap.after.orientation,
-              swap.after.color,
+              swap.after,
             );
           }
-          assembly.addPart(definitionId, newPosition, rotation, orientation, oldColor);
+          assembly.addPart(definitionId, newPosition, rotation, orientation, attrs);
         },
         undo() {
           for (const swap of adapted) {
@@ -557,7 +799,7 @@ export function App() {
               swap.before.position,
               swap.before.rotation,
               swap.before.orientation,
-              swap.before.color,
+              swap.before,
             );
           }
           // Find the part at the new position and move it back
@@ -571,7 +813,7 @@ export function App() {
           );
           if (match) {
             assembly.removePart(match.instanceId);
-            assembly.addPart(definitionId, oldPosition, oldRotation, oldOrientation, oldColor);
+            assembly.addPart(definitionId, oldPosition, oldRotation, oldOrientation, attrs);
           }
         },
       };
@@ -579,90 +821,14 @@ export function App() {
       const moved = findPlacedPart(definitionId, newPosition);
       if (moved) keepUnlocked([[instanceId, moved.instanceId]]);
     },
-    [keepUnlocked, refuseUnsoundHookup],
+    [keepUnlocked, refuseUnsoundHookup, moveParts],
   );
 
   const handleMoveSelectedParts = useCallback(
     (primaryId: string, newPosition: GridPosition, newRotation?: PlacedPart["rotation"], newOrientation?: Axis) => {
-      const primary = assembly.getPartById(primaryId);
-      if (!primary) return;
-
-      const delta: GridPosition = [
-        newPosition[0] - primary.position[0],
-        newPosition[1] - primary.position[1],
-        newPosition[2] - primary.position[2],
-      ];
-      if (delta[0] === 0 && delta[1] === 0 && delta[2] === 0 && !newRotation && !newOrientation) return;
-
-      // Snapshot all selected parts before moving
-      const partsToMove: {
-        id: string;
-        def: string;
-        oldPos: GridPosition;
-        oldRot: Rotation3;
-        oldOrient?: Axis;
-        color?: string;
-        newPos: GridPosition;
-        newRot: Rotation3;
-        newOrient?: Axis;
-      }[] = [];
-      for (const id of selectedPartIds) {
-        const part = assembly.getPartById(id);
-        if (!part) continue;
-        const isPrimary = id === primaryId;
-        partsToMove.push({
-          id,
-          def: part.definitionId,
-          oldPos: part.position,
-          oldRot: part.rotation,
-          oldOrient: part.orientation,
-          color: part.color,
-          newPos: isPrimary
-            ? newPosition
-            : [part.position[0] + delta[0], part.position[1] + delta[1], part.position[2] + delta[2]],
-          newRot: isPrimary ? (newRotation ?? part.rotation) : part.rotation,
-          newOrient: isPrimary ? (newOrientation ?? part.orientation) : part.orientation,
-        });
-      }
-
-      const cmd: Command = {
-        description: `Move ${partsToMove.length} part(s)`,
-        execute() {
-          // Remove all first, then re-add at new positions (avoids collision with each other)
-          removeMatchingParts(
-            partsToMove.map((p) => ({
-              definitionId: p.def,
-              position: p.oldPos,
-              rotation: p.oldRot,
-              orientation: p.oldOrient,
-            })),
-          );
-          for (const p of partsToMove) assembly.addPart(p.def, p.newPos, p.newRot, p.newOrient, p.color);
-        },
-        undo() {
-          // Remove parts at new positions, re-add at old positions
-          const allParts = assembly.getAllParts();
-          for (const p of partsToMove) {
-            const match = allParts.find(
-              (ap) =>
-                ap.definitionId === p.def &&
-                ap.position[0] === p.newPos[0] &&
-                ap.position[1] === p.newPos[1] &&
-                ap.position[2] === p.newPos[2],
-            );
-            if (match) assembly.removePart(match.instanceId);
-          }
-          for (const p of partsToMove) assembly.addPart(p.def, p.oldPos, p.oldRot, p.oldOrient, p.color);
-        },
-      };
-      history.execute(cmd);
-      keepUnlocked(
-        partsToMove
-          .map((p) => [p.id, findPlacedPart(p.def, p.newPos)?.instanceId] as const)
-          .filter((pair): pair is [string, string] => !!pair[1]),
-      );
+      moveParts(selectedPartIds, primaryId, newPosition, newRotation, newOrientation);
     },
-    [selectedPartIds, keepUnlocked],
+    [moveParts, selectedPartIds],
   );
 
   /**
@@ -684,6 +850,7 @@ export function App() {
         rot: Rotation3;
         orient?: Axis;
         color?: string;
+        groupId?: string;
       }[] = [];
       for (const id of ids) {
         const part = assembly.getPartById(id);
@@ -695,6 +862,7 @@ export function App() {
           rot: part.rotation,
           orient: part.orientation,
           color: part.color,
+          groupId: part.groupId,
         });
       }
       if (moving.length === 0) return null;
@@ -733,14 +901,14 @@ export function App() {
           removeMatchingParts(
             moving.map((p) => ({ definitionId: p.def, position: p.oldPos, rotation: p.rot, orientation: p.orient })),
           );
-          for (const p of moving) assembly.addPart(p.def, movedPositionOf(p), p.rot, p.orient, p.color);
+          for (const p of moving) assembly.addPart(p.def, movedPositionOf(p), p.rot, p.orient, p);
         },
         undo() {
           for (const p of moving) {
             const match = findMoved(p);
             if (match) assembly.removePart(match.instanceId);
           }
-          for (const p of moving) assembly.addPart(p.def, p.oldPos, p.rot, p.orient, p.color);
+          for (const p of moving) assembly.addPart(p.def, p.oldPos, p.rot, p.orient, p);
         },
       };
       history.execute(cmd);
@@ -873,6 +1041,7 @@ export function App() {
         rotation: p.rotation,
         orientation: p.orientation,
         color: p.color,
+        groupId: p.groupId,
       }));
 
       /*
@@ -909,6 +1078,7 @@ export function App() {
                 rotation: [...connector.rotation] as Rotation3,
                 orientation: connector.orientation,
                 color: connector.color,
+                groupId: connector.groupId,
               },
               after: {
                 definitionId: a.definitionId,
@@ -916,6 +1086,7 @@ export function App() {
                 rotation: a.rotation,
                 orientation: connector.orientation,
                 color: connector.color,
+                groupId: connector.groupId,
               },
             },
           ];
@@ -940,12 +1111,12 @@ export function App() {
               swap.after.position,
               swap.after.rotation,
               swap.after.orientation,
-              swap.after.color,
+              swap.after,
             );
           }
           created = [];
           for (const t of turned) {
-            const id = assembly.addPart(t.definitionId, t.position, t.rotation, t.orientation, t.color);
+            const id = assembly.addPart(t.definitionId, t.position, t.rotation, t.orientation, t);
             if (id) created.push(id);
           }
           setSelectedPartIds(new Set(created));
@@ -959,12 +1130,12 @@ export function App() {
               swap.before.position,
               swap.before.rotation,
               swap.before.orientation,
-              swap.before.color,
+              swap.before,
             );
           }
           const restored: string[] = [];
           for (const p of before) {
-            const id = assembly.addPart(p.definitionId, p.position, p.rotation, p.orientation, p.color);
+            const id = assembly.addPart(p.definitionId, p.position, p.rotation, p.orientation, p);
             if (id) restored.push(id);
           }
           setSelectedPartIds(new Set(restored));
@@ -987,6 +1158,7 @@ export function App() {
       rot: Rotation3;
       oldOrient: Axis;
       color?: string;
+      groupId?: string;
     }[] = [];
     for (const id of selectedPartIds) {
       const part = assembly.getPartById(id);
@@ -1000,6 +1172,7 @@ export function App() {
         rot: part.rotation,
         oldOrient: part.orientation ?? "y",
         color: part.color,
+        groupId: part.groupId,
       });
     }
     if (partsToOrient.length === 0) return;
@@ -1016,7 +1189,7 @@ export function App() {
           })),
         );
         for (const p of partsToOrient) {
-          assembly.addPart(p.def, p.pos, p.rot, nextOrientation(p.oldOrient), p.color);
+          assembly.addPart(p.def, p.pos, p.rot, nextOrientation(p.oldOrient), p);
         }
       },
       undo() {
@@ -1031,7 +1204,7 @@ export function App() {
           );
           if (match) assembly.removePart(match.instanceId);
         }
-        for (const p of partsToOrient) assembly.addPart(p.def, p.pos, p.rot, p.oldOrient, p.color);
+        for (const p of partsToOrient) assembly.addPart(p.def, p.pos, p.rot, p.oldOrient, p);
       },
     };
     history.execute(cmd);
@@ -1064,7 +1237,7 @@ export function App() {
   const [filterByPosition, setFilterByPosition] = useState(true);
 
   const handleClickPart = useCallback(
-    (instanceId: string, shiftKey: boolean, gridPoint?: GridPosition) => {
+    (instanceId: string, shiftKey: boolean, gridPoint?: GridPosition, solo?: boolean) => {
       if (mode.type !== "select") return;
 
       // Clicking the part that is already the whole selection picks a spot on it
@@ -1082,15 +1255,18 @@ export function App() {
 
       setSelectedPoint(null);
       setSelectedPartIds((prev) => {
+        // A group answers as one body — unless the click asked for the single part it
+        // hit, which is how one part of a group is got at without untying it
+        const family = solo ? [instanceId] : [...assembly.expandToGroups([instanceId])];
         if (shiftKey) {
           const next = new Set(prev);
-          if (next.has(instanceId)) next.delete(instanceId);
-          else next.add(instanceId);
+          if (next.has(instanceId)) for (const id of family) next.delete(id);
+          else for (const id of family) next.add(id);
           return next;
         }
-        // Toggle single selection
-        if (prev.size === 1 && prev.has(instanceId)) return new Set();
-        return new Set([instanceId]);
+        // Clicking what is already the whole selection drops it
+        if (prev.size === family.length && family.every((id) => prev.has(id))) return new Set();
+        return new Set(family);
       });
     },
     [mode, selectedPartIds],
@@ -1107,6 +1283,7 @@ export function App() {
     [selectedPartIds, selectedPoint, snapshot.parts],
   );
   selectedPointRef.current = selectedPoint;
+  selectedIdsRef.current = selectedPartIds;
 
   // A spot only means something while its part is the selection
   const activePoint = useMemo(() => {
@@ -1212,7 +1389,7 @@ export function App() {
             orientation: before.orientation,
           },
         ]);
-        const newId = assembly.addPart(definitionId, position, rotation, before.orientation, before.color);
+        const newId = assembly.addPart(definitionId, position, rotation, before.orientation, before);
         if (newId) setSelectedPartIds(new Set([newId]));
       },
       undo() {
@@ -1231,7 +1408,7 @@ export function App() {
           before.position,
           before.rotation,
           before.orientation,
-          before.color,
+          before,
         );
         if (restored) setSelectedPartIds(new Set([restored]));
       },
@@ -1306,7 +1483,8 @@ export function App() {
   const handleBoxSelect = useCallback((ids: string[]) => {
     setSelectedPartIds((prev) => {
       const next = new Set(prev);
-      for (const id of ids) next.add(id);
+      // A box that caught part of a group has caught the group
+      for (const id of assembly.expandToGroups(ids)) next.add(id);
       return next;
     });
   }, []);
@@ -1358,6 +1536,7 @@ export function App() {
               rotation: [...connector.rotation] as Rotation3,
               orientation: connector.orientation,
               color: connector.color,
+              groupId: connector.groupId,
             },
             after: {
               definitionId: adaptation.definitionId,
@@ -1365,6 +1544,7 @@ export function App() {
               rotation: adaptation.rotation,
               orientation: connector.orientation,
               color: connector.color,
+              groupId: connector.groupId,
             },
           },
         ];
@@ -1387,7 +1567,7 @@ export function App() {
               swap.after.position,
               swap.after.rotation,
               swap.after.orientation,
-              swap.after.color,
+              swap.after,
             );
           }
           assembly.addPart(definitionId, position, IDENTITY_ROTATION, orientation);
@@ -1409,7 +1589,7 @@ export function App() {
               swap.before.position,
               swap.before.rotation,
               swap.before.orientation,
-              swap.before.color,
+              swap.before,
             );
           }
         },
@@ -1467,7 +1647,7 @@ export function App() {
             orientation: before.orientation,
           },
         ]);
-        const newId = assembly.addPart(newDefId, position, IDENTITY_ROTATION, newOrientation, before.color);
+        const newId = assembly.addPart(newDefId, position, IDENTITY_ROTATION, newOrientation, before);
         if (newId) setSelectedPartIds(new Set([newId]));
       },
       undo() {
@@ -1486,7 +1666,7 @@ export function App() {
           before.position,
           before.rotation,
           before.orientation,
-          before.color,
+          before,
         );
         if (restored) setSelectedPartIds(new Set([restored]));
       },
@@ -1527,6 +1707,7 @@ export function App() {
         rotation: p.rotation,
         orientation: p.orientation,
         color: p.color,
+        groupId: p.groupId,
       })),
     };
     clipboardRef.current = clipboard;
@@ -1572,6 +1753,10 @@ export function App() {
       } else if ((e.ctrlKey || e.metaKey) && e.key === "c") {
         e.preventDefault();
         handleCopy();
+      } else if ((e.ctrlKey || e.metaKey) && (e.key === "g" || e.key === "G")) {
+        e.preventDefault();
+        if (e.shiftKey) handleUngroupSelected();
+        else handleGroupSelected();
       } else if ((e.ctrlKey || e.metaKey) && e.key === "v") {
         // No preventDefault: that would suppress the `paste` event below, which is
         // the only way to read the system clipboard without a permission prompt.
@@ -1596,7 +1781,7 @@ export function App() {
       window.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("paste", handleClipboardPaste);
     };
-  }, [handleUndo, handleRedo, handleCopy, handlePaste]);
+  }, [handleUndo, handleRedo, handleCopy, handlePaste, handleGroupSelected, handleUngroupSelected]);
 
   const handleClear = useCallback(() => {
     assembly.clear();
@@ -1711,7 +1896,14 @@ export function App() {
         rotation: Rotation3;
         orientation?: Axis;
         color?: string;
+        groupId?: string;
       }[] = [];
+      /*
+       * A pasted copy of a group is a group of its own: the parts stay tied to each
+       * other, but not to the parts they were copied from, which are still standing
+       * where they were.
+       */
+      const pastedGroups = new Map<string, string>();
       for (const cp of clipboard.parts) {
         const pos: GridPosition = [
           targetPosition[0] + cp.offset[0],
@@ -1719,12 +1911,14 @@ export function App() {
           targetPosition[2] + cp.offset[2],
         ];
         const rot = extraRotation ? addRot(cp.rotation, extraRotation) : cp.rotation;
+        if (cp.groupId && !pastedGroups.has(cp.groupId)) pastedGroups.set(cp.groupId, newGroupId());
         addedParts.push({
           definitionId: cp.definitionId,
           position: pos,
           rotation: rot,
           orientation: cp.orientation,
           color: cp.color,
+          groupId: cp.groupId ? pastedGroups.get(cp.groupId) : undefined,
         });
       }
       if (addedParts.length === 0) return;
@@ -1733,7 +1927,7 @@ export function App() {
         description: `Paste ${addedParts.length} part(s)`,
         execute() {
           for (const p of addedParts) {
-            assembly.addPart(p.definitionId, p.position, p.rotation, p.orientation, p.color);
+            assembly.addPart(p.definitionId, p.position, p.rotation, p.orientation, p);
           }
         },
         undo() {
@@ -1889,6 +2083,8 @@ export function App() {
           onFlashPart={handleFlashPart}
           onFlashDefinition={handleFlashDefinition}
           onSetColor={handleSetColor}
+          onGroup={handleGroupSelected}
+          onUngroup={handleUngroupSelected}
           inventory={inventory}
           onSetInventory={handleSetInventory}
         />

@@ -10,6 +10,8 @@ interface BOMPanelProps {
   onFlashPart: (instanceId: string) => void;
   onFlashDefinition: (definitionId: string) => void;
   onSetColor: (color: string | undefined) => void;
+  onGroup: () => void;
+  onUngroup: () => void;
   inventory: Record<string, number>;
   onSetInventory: (inventory: Record<string, number>) => void;
 }
@@ -40,6 +42,8 @@ export function BOMPanel({
   onFlashPart,
   onFlashDefinition,
   onSetColor,
+  onGroup,
+  onUngroup,
   inventory,
   onSetInventory,
 }: BOMPanelProps) {
@@ -47,6 +51,25 @@ export function BOMPanel({
   const [showInventory, setShowInventory] = useState(false);
 
   const selectedParts = parts.filter((p) => selectedPartIds.has(p.instanceId));
+
+  /*
+   * Which groups the selection is in, and how many parts each of them holds — a group
+   * left with one part is no group at all, so it is not announced as one.
+   */
+  const selectedGroups = new Set(selectedParts.map((p) => p.groupId).filter((g): g is string => !!g));
+  const groupSizes = new Map<string, number>();
+  for (const part of parts) {
+    if (part.groupId && selectedGroups.has(part.groupId)) {
+      groupSizes.set(part.groupId, (groupSizes.get(part.groupId) ?? 0) + 1);
+    }
+  }
+  const grouped = [...groupSizes.values()].filter((n) => n > 1);
+  const groupNote =
+    grouped.length === 1
+      ? `Grouped — ${grouped[0]} parts move as one`
+      : grouped.length > 1
+        ? `${grouped.length} groups selected`
+        : null;
 
   // If all selected parts share the same color, show it; otherwise null (mixed)
   const currentColor =
@@ -80,6 +103,30 @@ export function BOMPanel({
         <div className="selection-panel">
           <h3>Selected ({selectedParts.length})</h3>
           <ColorPicker currentColor={currentColor} onColorChange={onSetColor} />
+          <div className="group-actions">
+            <button
+              className="group-btn"
+              onClick={onGroup}
+              disabled={selectedParts.length < 2}
+              title="Group these parts so they are selected and moved as one body (Ctrl/Cmd+G)"
+            >
+              Group
+            </button>
+            <button
+              className="group-btn"
+              onClick={onUngroup}
+              disabled={selectedGroups.size === 0}
+              title="Untie the group (Ctrl/Cmd+Shift+G)"
+            >
+              Ungroup
+            </button>
+          </div>
+          {groupNote && (
+            <div className="group-note">
+              {groupNote}
+              <span className="group-note-hint">Alt+click picks one part out of it</span>
+            </div>
+          )}
           <ul className="selection-list">
             {selectedParts.map((p) => {
               const def = getPartDefinition(p.definitionId);

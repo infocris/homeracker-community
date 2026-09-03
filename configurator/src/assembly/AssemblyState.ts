@@ -34,6 +34,20 @@ function generateId(): string {
   return `part-${++nextId}-${Date.now()}`;
 }
 
+/**
+ * What a part carries besides its shape and where it stands.
+ *
+ * Passed as one bag rather than as loose arguments because every move is a remove
+ * plus an add: a command hands back the part it captured, and everything the part was
+ * carrying has to come back with it. One bag means a new attribute reaches all of
+ * those commands at once instead of being dropped by whichever one was overlooked.
+ */
+export interface PartAttrs {
+  color?: string;
+  /** Parts sharing a group id are handled as one body */
+  groupId?: string;
+}
+
 export interface AssemblySnapshot {
   parts: PlacedPart[];
   snapEnabled: boolean;
@@ -198,7 +212,7 @@ export class AssemblyState {
     position: GridPosition,
     rotation: PlacedPart["rotation"] = [0, 0, 0],
     orientation?: PlacedPart["orientation"],
-    color?: string,
+    attrs?: PartAttrs,
   ): string | null {
     const def = getPartDefinition(definitionId);
     if (!def) return null;
@@ -210,8 +224,9 @@ export class AssemblyState {
       position,
       rotation,
       orientation,
-      color,
     };
+    if (attrs?.color !== undefined) part.color = attrs.color;
+    if (attrs?.groupId !== undefined) part.groupId = attrs.groupId;
 
     this.parts.set(instanceId, part);
 
@@ -289,6 +304,44 @@ export class AssemblyState {
     if (changed) this.notify();
   }
 
+  /**
+   * Put these parts in a group, or drop them out of the one they are in with
+   * undefined. Group membership is a tag on the part, so it travels with the part
+   * through the remove-and-add every move is made of.
+   */
+  setPartsGroup(instanceIds: Iterable<string>, groupId: string | undefined): void {
+    let changed = false;
+    for (const id of instanceIds) {
+      const part = this.parts.get(id);
+      if (!part) continue;
+      if (groupId === undefined) {
+        if (part.groupId === undefined) continue;
+        delete part.groupId;
+      } else {
+        if (part.groupId === groupId) continue;
+        part.groupId = groupId;
+      }
+      changed = true;
+    }
+    if (changed) this.notify();
+  }
+
+  /** The parts of every group that has a part in `instanceIds`, ids included. */
+  expandToGroups(instanceIds: Iterable<string>): Set<string> {
+    const ids = new Set(instanceIds);
+    const groups = new Set<string>();
+    for (const id of ids) {
+      const groupId = this.parts.get(id)?.groupId;
+      if (groupId) groups.add(groupId);
+    }
+    if (groups.size > 0) {
+      for (const part of this.parts.values()) {
+        if (part.groupId && groups.has(part.groupId)) ids.add(part.instanceId);
+      }
+    }
+    return ids;
+  }
+
   /** Clear all parts */
   clear() {
     this.parts.clear();
@@ -360,6 +413,7 @@ export class AssemblyState {
         rotation: p.rotation,
         orientation: p.orientation,
         ...(p.color ? { color: p.color } : {}),
+        ...(p.groupId ? { group: p.groupId } : {}),
       })),
     };
   }
@@ -371,7 +425,7 @@ export class AssemblyState {
       const rot: PlacedPart["rotation"] = Array.isArray(p.rotation)
         ? (p.rotation as PlacedPart["rotation"])
         : [0, (p.rotation || 0) as any, 0];
-      this.addPart(p.type, p.position, rot, p.orientation, p.color);
+      this.addPart(p.type, p.position, rot, p.orientation, { color: p.color, groupId: p.group });
     }
   }
 }
