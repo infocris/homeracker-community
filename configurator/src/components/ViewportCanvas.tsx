@@ -3927,6 +3927,15 @@ export function ViewportCanvas(props: ViewportProps) {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
+      /*
+       * A Ctrl/Cmd chord belongs to the app's own shortcuts — undo, copy, group — and
+       * not to the bare letters below. Without this, Ctrl+Z turned the selection about
+       * z and the undo that followed in the same keystroke undid that very turn: undo
+       * looked like it did nothing, and nothing older could be reached at all while
+       * anything was selected.
+       */
+      if (e.ctrlKey || e.metaKey) return;
+
       if (e.key === "Escape") {
         // The panel owns Escape while it is open
         if (lightPanelOpen) {
