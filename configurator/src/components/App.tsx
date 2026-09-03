@@ -328,6 +328,25 @@ function regroupCommand(members: RegroupTarget[], groupId: string | undefined, d
   };
 }
 
+/**
+ * What copying these parts puts on the clipboard: each one's offset from the middle of
+ * the set, so a paste lands the set around wherever it is dropped.
+ */
+function clipboardFrom(parts: PlacedPart[]): ClipboardData | null {
+  if (parts.length === 0) return null;
+  const centre = [0, 1, 2].map((i) => Math.round(parts.reduce((sum, p) => sum + p.position[i], 0) / parts.length));
+  return {
+    parts: parts.map((p) => ({
+      definitionId: p.definitionId,
+      offset: [p.position[0] - centre[0], p.position[1] - centre[1], p.position[2] - centre[2]] as GridPosition,
+      rotation: p.rotation,
+      orientation: p.orientation,
+      color: p.color,
+      groupId: p.groupId,
+    })),
+  };
+}
+
 /** The part standing at this definition and position — how a moved part's new id is found */
 function findPlacedPart(definitionId: string, position: GridPosition): PlacedPart | undefined {
   return assembly
@@ -1700,32 +1719,38 @@ export function App() {
   const clipboardRef = useRef<ClipboardData | null>(null);
 
   const handleCopy = useCallback(() => {
-    if (selectedPartIds.size === 0) return;
     const parts = [...selectedPartIds].map((id) => assembly.getPartById(id)).filter((p): p is PlacedPart => !!p);
-    if (parts.length === 0) return;
-
-    const cx = parts.reduce((s, p) => s + p.position[0], 0) / parts.length;
-    const cy = parts.reduce((s, p) => s + p.position[1], 0) / parts.length;
-    const cz = parts.reduce((s, p) => s + p.position[2], 0) / parts.length;
-    const centerX = Math.round(cx);
-    const centerY = Math.round(cy);
-    const centerZ = Math.round(cz);
-
-    const clipboard: ClipboardData = {
-      parts: parts.map((p) => ({
-        definitionId: p.definitionId,
-        offset: [p.position[0] - centerX, p.position[1] - centerY, p.position[2] - centerZ] as GridPosition,
-        rotation: p.rotation,
-        orientation: p.orientation,
-        color: p.color,
-        groupId: p.groupId,
-      })),
-    };
+    const clipboard = clipboardFrom(parts);
+    if (!clipboard) return;
     clipboardRef.current = clipboard;
     navigator.clipboard.writeText(JSON.stringify({ homeracker: "clipboard", ...clipboard })).catch(() => {});
     setToast(`Copied ${parts.length} part(s)`);
     setTimeout(() => setToast(null), 2000);
   }, [selectedPartIds]);
+
+  /**
+   * A copy of a part put on the cursor, to be dropped with a click — the whole
+   * selection when the part is in it, and the whole group when it is in one, since
+   * that is what a click on it would take hold of.
+   *
+   * Through the clipboard rather than by placing a copy straight away: a duplicate has
+   * to land somewhere, and the paste it becomes already shows where it will go, drops
+   * it in one undoable step, and gives the copied group a group of its own.
+   */
+  const handleDuplicatePart = useCallback(
+    (instanceId: string) => {
+      const ids = selectedPartIds.has(instanceId) ? selectedPartIds : assembly.expandToGroups([instanceId]);
+      const parts = [...ids].map((id) => assembly.getPartById(id)).filter((p): p is PlacedPart => !!p);
+      const clipboard = clipboardFrom(parts);
+      if (!clipboard) return;
+      clipboardRef.current = clipboard;
+      setMode({ type: "paste", clipboard });
+      setSelectedPartIds(new Set());
+      setToast(`Copy of ${parts.length} part(s) — click to put it down`);
+      setTimeout(() => setToast(null), 2500);
+    },
+    [selectedPartIds],
+  );
 
   /** Parse pasted text, or null when it is not a HomeRacker payload. */
   const parseClipboardText = (text: string | null | undefined): ClipboardData | null => {
@@ -2072,6 +2097,7 @@ export function App() {
           onMovePart={handleMovePart}
           onMoveSelectedParts={handleMoveSelectedParts}
           onClickPart={handleClickPart}
+          onDuplicatePart={handleDuplicatePart}
           rotationPivot={rotationPivot}
           lockedPartIds={lockedPartIds}
           onLockedPartDrag={handleLockedPartDrag}

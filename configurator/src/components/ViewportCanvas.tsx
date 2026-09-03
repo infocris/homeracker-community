@@ -143,6 +143,8 @@ interface ViewportProps {
   onMoveSelectedParts: (primaryId: string, newPosition: GridPosition, rotation?: Rotation3, orientation?: Axis) => void;
   /** `solo` asks for the one part hit rather than the group it belongs to */
   onClickPart: (instanceId: string, shiftKey: boolean, gridPoint?: GridPosition, solo?: boolean) => void;
+  /** Middle-clicked: a copy of it goes on the cursor */
+  onDuplicatePart: (instanceId: string) => void;
   /** The cell the coming turn pivots about, so the rings show what will happen */
   rotationPivot: GridPosition | null;
   /** Parts held in place — selectable and clickable, but not draggable */
@@ -3813,11 +3815,25 @@ export function ViewportCanvas(props: ViewportProps) {
     });
   }, []);
 
+  /**
+   * A middle press that landed on a part. Released without travelling it duplicates
+   * the part; travelled, it was the camera being panned — the same bargain the right
+   * button strikes between cancelling and panning.
+   */
+  const middlePressRef = useRef<{ x: number; y: number; instanceId: string } | null>(null);
+
   // Handle pointer down on a part — records pending drag start
   const handlePartPointerDown = useCallback(
     (instanceId: string, nativeEvent: PointerEvent, hit?: THREE.Vector3) => {
       if (props.mode.type !== "select") return;
-      // Left drags the footprint, right drags the height; middle is left to panning
+      if (nativeEvent.button === 1) {
+        // Nothing is taken from the camera here: the release decides. preventDefault
+        // only sees off the browser's own middle-click habits, autoscroll above all.
+        nativeEvent.preventDefault();
+        middlePressRef.current = { x: nativeEvent.clientX, y: nativeEvent.clientY, instanceId };
+        return;
+      }
+      // Left drags the footprint, right drags the height
       if (nativeEvent.button !== 0 && nativeEvent.button !== 2) return;
       pendingDragRef.current = {
         instanceId,
@@ -3940,6 +3956,8 @@ export function ViewportCanvas(props: ViewportProps) {
         setBoxSelectRect(null);
         return;
       }
+
+      middlePressRef.current = null;
 
       // Part drag/click finalize
       const pending = pendingDragRef.current;
@@ -4125,12 +4143,13 @@ export function ViewportCanvas(props: ViewportProps) {
   // Right-press origin, used to tell a cancelling right-click from a right-drag pan
   const rightPressRef = useRef<{ x: number; y: number } | null>(null);
 
-  // Start box-select on shift+pointerdown on empty space
+  // Start box-select on shift+pointerdown, or on both buttons together, over empty space
   const handleViewportPointerDown = useCallback(
     (e: React.PointerEvent) => {
       // Remembered for every press: the scene needs it to tell a click from the tail
       // end of a camera drag, which the browser reports as a click all the same
       pressOriginRef.current = { x: e.clientX, y: e.clientY };
+
       if (e.button === 2) {
         // A right press that landed on a part starts a height drag, so it must not
         // also register as the click that cancels or deselects
@@ -4146,16 +4165,27 @@ export function ViewportCanvas(props: ViewportProps) {
     [props.mode],
   );
 
-  // A stationary right-click acts as Escape; a right-drag still pans the camera
+  /**
+   * A stationary right-click acts as Escape and a stationary middle-click duplicates;
+   * a drag with either button still moves the camera.
+   */
   const handleViewportPointerUp = useCallback(
     (e: React.PointerEvent) => {
+      if (e.button === 1) {
+        const middle = middlePressRef.current;
+        middlePressRef.current = null;
+        if (!middle) return; // the press began on empty space: the camera's business
+        if (Math.hypot(e.clientX - middle.x, e.clientY - middle.y) >= DRAG_THRESHOLD) return;
+        props.onDuplicatePart(middle.instanceId);
+        return;
+      }
       const press = rightPressRef.current;
       rightPressRef.current = null;
       if (e.button !== 2 || !press) return;
       if (Math.hypot(e.clientX - press.x, e.clientY - press.y) >= DRAG_THRESHOLD) return;
       cancelCurrentAction();
     },
-    [cancelCurrentAction],
+    [cancelCurrentAction, props.onDuplicatePart],
   );
 
   // The viewport owns the right button, so the native menu never applies here
@@ -4190,8 +4220,8 @@ export function ViewportCanvas(props: ViewportProps) {
         : `Drag across the ground to lay down a support · Right-click or ${cancelKey} cancel`;
   } else if (props.mode.type === "select" && props.selectedPartIds.size > 0) {
     hintText = selectedResizable
-      ? `Drag face handles to resize · Suggested parts appear on the right · ${keyLabel("delete")} delete · Right-click or ${cancelKey} deselect`
-      : `${nudgeKeys} nudge, Shift for finer · ${liftKeys} up and down · ${turnKeys} turn in the xz, xy and yz planes, Shift to reverse · ${keyLabel("copy")}/${keyLabel("paste")} copy/paste · ${keyLabel("delete")} delete · Right-click or ${cancelKey} deselect`;
+      ? `Drag face handles to resize · Suggested parts appear on the right · Middle-click to duplicate · ${keyLabel("delete")} delete · Right-click or ${cancelKey} deselect`
+      : `${nudgeKeys} nudge, Shift for finer · ${liftKeys} up and down · ${turnKeys} turn in the xz, xy and yz planes, Shift to reverse · ${keyLabel("copy")}/${keyLabel("paste")} copy/paste, middle-click duplicates · ${keyLabel("delete")} delete · Right-click or ${cancelKey} deselect`;
   } else if (props.mode.type === "paste") {
     hintText = `Click to paste ${props.mode.clipboard.parts.length} part(s) · ${turnKeys} rotate · ${cancelKey} cancel`;
   }
