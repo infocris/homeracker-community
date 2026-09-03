@@ -3,6 +3,7 @@ import type { AssemblyState } from "./AssemblyState";
 import { computeGroundLift } from "./grid-utils";
 import { settleWithGravity } from "./gravity";
 import { bestPartForSize, clampToSupportLength, orientationForSize, IDENTITY_ROTATION } from "./part-sizing";
+import { hookupAxisAt } from "./compatibility";
 
 export type ResolvedDraw = {
   definitionId: string;
@@ -28,7 +29,17 @@ export function resolveDraw(
   const target = bestPartForSize(capped, "support");
   if (!target) return null;
 
-  const orientation = orientationForSize(target, capped);
+  let orientation = orientationForSize(target, capped);
+
+  /*
+   * One cell says nothing about which way a bar lies, so it comes out upright by
+   * default — which is the one thing it cannot be when it is being drawn into a
+   * connector's arm reaching sideways. Where the cell has an arm asking for an axis,
+   * that is the answer.
+   */
+  if (capped[0] === 1 && capped[1] === 1 && capped[2] === 1) {
+    orientation = hookupAxisAt(assembly, position) ?? orientation;
+  }
   if (!gravityEnabled) {
     return { definitionId: target.id, position, orientation, size: capped };
   }

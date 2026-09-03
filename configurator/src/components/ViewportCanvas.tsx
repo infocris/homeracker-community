@@ -188,9 +188,29 @@ export function computeDrawSpan(
   start: GridPosition,
   end: GridPosition,
   axis: DrawAxis = "horizontal",
+  /**
+   * The way the bar runs, when the draw began somewhere that settles it — a
+   * connector's free side faces one way and one way only, and a bar laid across that
+   * side rather than along it is not a hookup the assembly would accept.
+   */
+  direction?: Direction,
 ): { position: GridPosition; size: [number, number, number] } {
   // The cell the drag started on stays anchored, so capping the length shortens the
   // far end rather than sliding the whole bar away from where the drag began.
+  if (direction) {
+    const step = DIRECTION_STEP[direction];
+    const i = step[0] !== 0 ? 0 : step[1] !== 0 ? 1 : 2;
+    const sign = step[i];
+    // How far the pointer has gone the way the bar runs; going back the other way
+    // leaves the single cell the draw started in
+    const n = Math.min(Math.max(1, (end[i] - start[i]) * sign + 1), MAX_SUPPORT_LENGTH);
+    const position: GridPosition = [...start];
+    if (sign < 0) position[i] = start[i] - (n - 1);
+    const size: [number, number, number] = [1, 1, 1];
+    size[i] = n;
+    return { position, size };
+  }
+
   if (axis === "vertical") {
     // An upright bar stands on the cell that was clicked and grows towards the sky
     const n = Math.min(Math.max(1, end[1] - start[1] + 1), MAX_SUPPORT_LENGTH);
@@ -2536,6 +2556,7 @@ function ExposeScene() {
     (window as any).__scene = scene;
     (window as any).__camera = camera;
     (window as any).__controls = controls;
+    (window as any).__computeDrawSpan = computeDrawSpan;
   }, [scene, camera, controls]);
   return null;
 }
@@ -2765,7 +2786,13 @@ interface SceneProps extends ViewportProps {
   yLift: number;
   boxSelectActive: boolean;
   collidingPartIds: Set<string>;
-  drawDrag: { start: GridPosition; current: GridPosition; axis?: DrawAxis; held?: boolean } | null;
+  drawDrag: {
+    start: GridPosition;
+    current: GridPosition;
+    axis?: DrawAxis;
+    direction?: Direction;
+    held?: boolean;
+  } | null;
   onDrawPointerDown: (grid: GridPosition) => void;
   /** Start a draw from a free side of the selected connector, along that side */
   onDrawFromSpot: (spot: FreeSpot) => void;
@@ -3022,7 +3049,9 @@ function Scene({
   );
 
   const sceneDrawAxis: DrawAxis = drawDrag?.axis ?? (mode.type === "draw" ? mode.axis : "horizontal");
-  const drawSpan = drawDrag ? computeDrawSpan(drawDrag.start, drawDrag.current, sceneDrawAxis) : null;
+  const drawSpan = drawDrag
+    ? computeDrawSpan(drawDrag.start, drawDrag.current, sceneDrawAxis, drawDrag.direction)
+    : null;
   // Preview the settled placement, not the raw span — same resolver as the commit
   const drawPreview = drawSpan
     ? (resolveDraw(assembly, drawSpan.position, drawSpan.size, gravityEnabled && !drawDrag?.held) ?? drawSpan)
@@ -3453,6 +3482,8 @@ export function ViewportCanvas(props: ViewportProps) {
     current: GridPosition;
     /** Set when the draw began on a connector's free side, which fixes its axis */
     axis?: DrawAxis;
+    /** The side it began on, which fixes which way the bar runs and not just its axis */
+    direction?: Direction;
     /** A bar plugged into an arm is held by it, whatever gravity would prefer */
     held?: boolean;
   } | null>(null);
@@ -3471,8 +3502,9 @@ export function ViewportCanvas(props: ViewportProps) {
   const handleDrawFromSpot = useCallback((spot: FreeSpot) => {
     const axis: DrawAxis = spot.direction[1] === "y" ? "vertical" : "horizontal";
     const start: GridPosition = [...spot.cell];
-    drawDragRef.current = { start, current: [...start], axis, held: true };
-    setDrawDrag({ start, current: [...start], axis, held: true });
+    const begun = { start, current: [...start] as GridPosition, axis, direction: spot.direction, held: true };
+    drawDragRef.current = begun;
+    setDrawDrag(begun);
   }, []);
 
   /**
@@ -3493,7 +3525,7 @@ export function ViewportCanvas(props: ViewportProps) {
     if (!drag) return;
     drawDragRef.current = null;
     setDrawDrag(null);
-    const { position, size } = computeDrawSpan(drag.start, drag.current, drawAxis);
+    const { position, size } = computeDrawSpan(drag.start, drag.current, drawAxis, drag.direction);
     props.onDraw(position, size, drag.held);
   }, [props.onDraw, drawAxis]);
 
@@ -3532,7 +3564,10 @@ export function ViewportCanvas(props: ViewportProps) {
         normal.normalize();
         uprightPlane.setFromNormalAndCoplanarPoint(normal, anchorWorld);
         if (!raycaster.ray.intersectPlane(uprightPlane, hit)) return;
-        const y = Math.max(anchor[1], Math.round((hit.y - BASE_UNIT / 2) / BASE_UNIT));
+        // A draw with a side of its own grows the way that side faces, up or down;
+        // one begun in draw mode only ever grows up from the cell that was clicked
+        const level = Math.round((hit.y - BASE_UNIT / 2) / BASE_UNIT);
+        const y = drawDrag.direction ? level : Math.max(anchor[1], level);
         setDrawDrag((prev) => (prev ? { ...prev, current: [anchor[0], y, anchor[2]] } : null));
         return;
       }
