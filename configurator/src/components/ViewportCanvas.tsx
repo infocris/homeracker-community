@@ -68,6 +68,8 @@ import {
   saveLightSettings,
 } from "./ShadowSettings";
 import { KeyBindingsPanel } from "./KeyBindingsPanel";
+import { MouseGlyph, nameForButtons, useHeldButtons } from "./MouseGlyph";
+import { buttonsLabel, gestureLogIsOn, logGesture, setGestureLogOn, subscribeGestureLog } from "../debug/gesture-log";
 import type { ActionId } from "../input/actions";
 import { actionOf, bindings, comboLabel, keyLabel, subscribeBindings } from "../input/keybindings";
 import {
@@ -1414,6 +1416,30 @@ function GroupOutline({ min, max }: { min: GridPosition; max: GridPosition }) {
         depthWrite={false}
       />
     </lineSegments>
+  );
+}
+
+/**
+ * A mouse in the corner of the view, showing the buttons actually held.
+ *
+ * Which button is down is otherwise something you can only find out by what happens
+ * next — a box appearing, a part moving, the view swinging round — and the chords this
+ * viewport answers to are worth being sure of before the fact rather than after. It
+ * doubles as the way into the full list, which is where the rest of them are written
+ * down.
+ */
+function MouseIndicator({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
+  const held = useHeldButtons();
+  return (
+    <button
+      type="button"
+      className={`viewport-mouse${held.length > 0 ? " viewport-mouse--held" : ""}`}
+      onClick={onOpenShortcuts}
+      title="What the mouse does here — click for the whole list"
+    >
+      <MouseGlyph buttons={held} size={22} />
+      {held.length > 0 && <span className="viewport-mouse-label">{nameForButtons(held)}</span>}
+    </button>
   );
 }
 
@@ -3363,6 +3389,7 @@ export function ViewportCanvas(props: ViewportProps) {
    * both rebuilt the moment one is changed.
    */
   const keys = useSyncExternalStore(subscribeBindings, bindings);
+  const logging = useSyncExternalStore(subscribeGestureLog, gestureLogIsOn);
 
   useEffect(() => {
     saveLightSettings(light);
@@ -3502,6 +3529,7 @@ export function ViewportCanvas(props: ViewportProps) {
    * side faces, and the side settles whether the bar is drawn out flat or upright.
    */
   const handleDrawFromSpot = useCallback((spot: FreeSpot) => {
+    logGesture("draw from a connector's side", spot.direction);
     const axis: DrawAxis = spot.direction[1] === "y" ? "vertical" : "horizontal";
     const start: GridPosition = [...spot.cell];
     const begun = { start, current: [...start] as GridPosition, axis, direction: spot.direction, held: true };
@@ -3528,6 +3556,7 @@ export function ViewportCanvas(props: ViewportProps) {
     drawDragRef.current = null;
     setDrawDrag(null);
     const { position, size } = computeDrawSpan(drag.start, drag.current, drawAxis, drag.direction);
+    logGesture("draw", `${size.join("×")} at ${position.join(",")}`);
     props.onDraw(position, size, drag.held);
   }, [props.onDraw, drawAxis]);
 
@@ -3846,6 +3875,7 @@ export function ViewportCanvas(props: ViewportProps) {
   const handlePartPointerDown = useCallback(
     (instanceId: string, nativeEvent: PointerEvent, hit?: THREE.Vector3) => {
       if (props.mode.type !== "select") return;
+      logGesture("press on part", `${instanceId.slice(0, 12)} · buttons ${buttonsLabel(nativeEvent.buttons)}`);
       if (nativeEvent.button === 1) {
         // Nothing is taken from the camera here: the release decides. preventDefault
         // only sees off the browser's own middle-click habits, autoscroll above all.
@@ -3915,6 +3945,7 @@ export function ViewportCanvas(props: ViewportProps) {
           }
           return;
         }
+        logGesture("drag started", pending.vertical ? "height, from a right press" : "footprint");
         const part = props.assembly.getPartById(pending.instanceId);
         if (part) {
           // Preserve current Y elevation: yLift = currentY - autoGroundLift
@@ -3967,6 +3998,7 @@ export function ViewportCanvas(props: ViewportProps) {
                 matched.push(part.instanceId);
               }
             }
+            logGesture("box select", `${matched.length} part(s) caught`);
             if (matched.length > 0) {
               props.onBoxSelect(matched);
             }
@@ -3989,6 +4021,7 @@ export function ViewportCanvas(props: ViewportProps) {
 
       if (dragState) {
         const target = dropTargetRef.current;
+        logGesture("dropped", `at ${target.position.join(",")}`);
         // If dragging a part from a multi-selection, move all selected parts by the same delta
         if (props.selectedPartIds.size > 1 && props.selectedPartIds.has(dragState.instanceId)) {
           props.onMoveSelectedParts(dragState.instanceId, target.position, target.rotation, target.orientation);
@@ -4186,12 +4219,21 @@ export function ViewportCanvas(props: ViewportProps) {
        * move keeps its drag: there the right button means height, and the chord has
        * been that gesture's second half for longer.
        */
+      logGesture("press", `button ${e.button} · buttons ${buttonsLabel(e.buttons)} · mode ${props.mode.type}`);
+
       const bothButtons = (e.buttons & 1) !== 0 && (e.buttons & 2) !== 0;
       if (bothButtons && props.mode.type === "select" && !dragState) {
         pendingDragRef.current = null;
         rightPressRef.current = null;
         beginBoxGesture({ startX: e.clientX, startY: e.clientY });
+        logGesture("box select armed", "both buttons — the camera is held still");
         return;
+      }
+      if (bothButtons) {
+        logGesture(
+          "both buttons ignored",
+          dragState ? "a part is already on the move" : `mode is ${props.mode.type}, not select`,
+        );
       }
 
       if (e.button === 2) {
@@ -4205,6 +4247,7 @@ export function ViewportCanvas(props: ViewportProps) {
       // If a part was clicked, pendingDragRef is already set — don't start box select
       if (pendingDragRef.current) return;
       beginBoxGesture({ startX: e.clientX, startY: e.clientY });
+      logGesture("box select armed", "shift+drag — the camera is held still");
     },
     [props.mode, dragState, beginBoxGesture],
   );
@@ -4215,11 +4258,16 @@ export function ViewportCanvas(props: ViewportProps) {
    */
   const handleViewportPointerUp = useCallback(
     (e: React.PointerEvent) => {
+      logGesture("release", `button ${e.button} · still held ${buttonsLabel(e.buttons)}`);
       if (e.button === 1) {
         const middle = middlePressRef.current;
         middlePressRef.current = null;
         if (!middle) return; // the press began on empty space: the camera's business
-        if (Math.hypot(e.clientX - middle.x, e.clientY - middle.y) >= DRAG_THRESHOLD) return;
+        if (Math.hypot(e.clientX - middle.x, e.clientY - middle.y) >= DRAG_THRESHOLD) {
+          logGesture("middle drag", "the camera panned; nothing duplicated");
+          return;
+        }
+        logGesture("duplicate", "a copy goes on the cursor");
         props.onDuplicatePart(middle.instanceId);
         return;
       }
@@ -4442,6 +4490,14 @@ export function ViewportCanvas(props: ViewportProps) {
             Keys
           </button>
           <button
+            className={`viewport-connectors-toggle${logging ? " viewport-mirror-toggle--on" : ""}`}
+            type="button"
+            onClick={() => setGestureLogOn(!logging)}
+            title="Write every press, gesture and change of mode into a list on the right"
+          >
+            Gestures: {logging ? "On" : "Off"}
+          </button>
+          <button
             className={`viewport-connectors-toggle${!showRotationGuides ? " viewport-mirror-toggle--on" : ""}`}
             type="button"
             onClick={() => setShowRotationGuides((v) => !v)}
@@ -4482,6 +4538,7 @@ export function ViewportCanvas(props: ViewportProps) {
       {workspacePanelOpen && (
         <WorkspaceSettings size={workspace} onChange={setWorkspace} onClose={() => setWorkspacePanelOpen(false)} />
       )}
+      <MouseIndicator onOpenShortcuts={() => setShortcutsOpen(true)} />
       {shortcutsOpen && <KeyBindingsPanel onClose={() => setShortcutsOpen(false)} />}
       {boxSelectRect && (
         <div

@@ -74,6 +74,8 @@ import {
 } from "../data/custom-parts";
 import { encodeAssemblyToHash, decodeAssemblyFromHash, hasCustomParts } from "../sharing/url-sharing";
 import { ACTIONS, actionOf, comboOf, conflictOf, isReserved, keysOf, resetKeys, setKeys } from "../input/keybindings";
+import { GestureLog } from "./GestureLog";
+import { gestureLogIsOn, logGesture, subscribeGestureLog } from "../debug/gesture-log";
 
 /** True for an element that owns its own copy/paste/undo behaviour. */
 function isTextEntry(target: EventTarget | null): boolean {
@@ -1260,6 +1262,28 @@ export function App() {
     keepUnlocked(released);
   }, [selectedPartIds, keepUnlocked]);
 
+  /*
+   * The two things a gesture is answered by, written into the log as they change: what
+   * the pointer is armed with, and what it has hold of. Which gesture did what is
+   * otherwise left to be inferred from the scene.
+   */
+  useEffect(() => {
+    logGesture(
+      "mode",
+      mode.type === "place"
+        ? `place ${mode.definitionId}`
+        : mode.type === "draw"
+          ? `draw ${mode.axis}`
+          : mode.type === "paste"
+            ? `paste ${mode.clipboard.parts.length} part(s)`
+            : "select",
+    );
+  }, [mode]);
+
+  useEffect(() => {
+    logGesture("selection", selectedPartIds.size === 0 ? "nothing" : `${selectedPartIds.size} part(s)`);
+  }, [selectedPartIds]);
+
   /** Spot picked by re-clicking an already-selected part */
   const [selectedPoint, setSelectedPoint] = useState<AttachmentPoint | null>(null);
   // On by default: picking a spot is a deliberate act, so narrowing the catalog to
@@ -1910,6 +1934,7 @@ export function App() {
   }, []);
 
   const [toast, setToast] = useState<string | null>(null);
+  const logging = useSyncExternalStore(subscribeGestureLog, gestureLogIsOn);
 
   const handleShare = useCallback(async () => {
     const data = assembly.serialize();
@@ -2124,6 +2149,7 @@ export function App() {
         />
       </div>
       <div className="right-panel">
+        {logging && <GestureLog />}
         <BOMPanel
           entries={bom}
           selectedPartIds={selectedPartIds}
