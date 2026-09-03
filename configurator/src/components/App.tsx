@@ -73,6 +73,7 @@ import {
   restoreEmbeddedCustomParts,
 } from "../data/custom-parts";
 import { encodeAssemblyToHash, decodeAssemblyFromHash, hasCustomParts } from "../sharing/url-sharing";
+import { ACTIONS, actionOf, comboOf, conflictOf, isReserved, keysOf, resetKeys, setKeys } from "../input/keybindings";
 
 /** True for an element that owns its own copy/paste/undo behaviour. */
 function isTextEntry(target: EventTarget | null): boolean {
@@ -155,6 +156,16 @@ assembly.subscribe(() => {
   placementAtPoint,
   supportHookupIsSound,
   hookupAxisAt,
+};
+(window as any).__keys = {
+  ACTIONS,
+  actionOf,
+  comboOf,
+  conflictOf,
+  isReserved,
+  keysOf,
+  setKeys,
+  resetKeys,
 };
 (window as any).__groups = {
   regroupTargets,
@@ -1744,23 +1755,34 @@ export function App() {
       // Leave text fields alone — Ctrl+C/V/Z there belong to the field
       if (isTextEntry(e.target)) return;
 
-      if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) {
-        e.preventDefault();
-        handleUndo();
-      } else if ((e.ctrlKey || e.metaKey) && (e.key === "y" || (e.key === "z" && e.shiftKey))) {
-        e.preventDefault();
-        handleRedo();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === "c") {
-        e.preventDefault();
-        handleCopy();
-      } else if ((e.ctrlKey || e.metaKey) && (e.key === "g" || e.key === "G")) {
-        e.preventDefault();
-        if (e.shiftKey) handleUngroupSelected();
-        else handleGroupSelected();
-      } else if ((e.ctrlKey || e.metaKey) && e.key === "v") {
-        // No preventDefault: that would suppress the `paste` event below, which is
-        // the only way to read the system clipboard without a permission prompt.
-        handlePaste();
+      // Which keys these are is the keybinding registry's business; the viewport
+      // reads the same answer for the actions it owns, and ignores these
+      switch (actionOf(e)) {
+        case "undo":
+          e.preventDefault();
+          handleUndo();
+          break;
+        case "redo":
+          e.preventDefault();
+          handleRedo();
+          break;
+        case "copy":
+          e.preventDefault();
+          handleCopy();
+          break;
+        case "group":
+          e.preventDefault();
+          handleGroupSelected();
+          break;
+        case "ungroup":
+          e.preventDefault();
+          handleUngroupSelected();
+          break;
+        case "paste":
+          // No preventDefault: that would suppress the `paste` event below, which is
+          // the only way to read the system clipboard without a permission prompt.
+          handlePaste();
+          break;
       }
     };
 

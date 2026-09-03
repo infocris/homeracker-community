@@ -67,6 +67,9 @@ import {
   loadLightSettings,
   saveLightSettings,
 } from "./ShadowSettings";
+import { KeyBindingsPanel } from "./KeyBindingsPanel";
+import type { ActionId } from "../input/actions";
+import { actionOf, bindings, comboLabel, keyLabel, subscribeBindings } from "../input/keybindings";
 import {
   type AttachmentPoint,
   type ConnectorAdaptation,
@@ -785,13 +788,20 @@ function keyForAxis(camera: THREE.Camera, axis: 0 | 1 | 2): "X" | "Y" | "Z" {
   return axis === axes.y ? "Y" : "Z";
 }
 
-/**
- * Where each ring carries its shortcut, as a unit vector scaled by the radius. Each
- * sits at 45° in its own ring's plane, in a direction the other two rings do not pass
- * through, so the three badges stay apart whatever the camera does.
- */
-/** The arrows that move a selection across the ground. */
-const ARROW_KEYS = new Set(["ArrowRight", "ArrowLeft", "ArrowUp", "ArrowDown"]);
+/** The screen axis each turn action asks for, named as the keys were */
+const TURN_AXIS: Partial<Record<ActionId, "x" | "y" | "z">> = {
+  "turn-x": "x",
+  "turn-y": "y",
+  "turn-z": "z",
+};
+
+/** The ground step each nudge action asks for, as arrowGroundSteps names them */
+const NUDGE_STEP: Partial<Record<ActionId, string>> = {
+  "nudge-right": "ArrowRight",
+  "nudge-left": "ArrowLeft",
+  "nudge-forward": "ArrowUp",
+  "nudge-back": "ArrowDown",
+};
 
 type GroundStep = [number, number, number];
 
@@ -849,6 +859,12 @@ const TOUCHING_CELLS: [number, number, number][] = [
 ];
 
 const DIAGONAL = Math.SQRT1_2;
+
+/**
+ * Where each ring carries its shortcut, as a unit vector scaled by the radius. Each
+ * sits at 45° in its own ring's plane, in a direction the other two rings do not pass
+ * through, so the three badges stay apart whatever the camera does.
+ */
 const KEY_BADGE_AT: [number, number, number][] = [
   [0, DIAGONAL, DIAGONAL],
   [DIAGONAL, 0, DIAGONAL],
@@ -904,6 +920,16 @@ function RotationHandles({
     const next = [0, 1, 2].map((a) => keyForAxis(camera, a as 0 | 1 | 2)) as ("X" | "Y" | "Z")[];
     if (next.some((k, i) => k !== keys[i])) setKeys(next);
   });
+
+  /*
+   * What the badge says is the key that is actually bound to that turn, not the letter
+   * the axis is named after: rebind the turn and the ring says so.
+   */
+  const bound = useSyncExternalStore(subscribeBindings, bindings);
+  const badge = (axis: number) => {
+    const combos = bound[`turn-${keys[axis].toLowerCase()}` as ActionId];
+    return combos.length > 0 ? comboLabel(combos[0]) : "—";
+  };
   // Perpendicular to the axis it turns about: the ring lies in the plane of the turn
   const lie: [number, number, number][] = [
     [0, Math.PI / 2, 0],
@@ -969,7 +995,7 @@ function RotationHandles({
               opacity: hovered === null || hovered === axis ? 1 : 0.5,
               pointerEvents: "auto",
             }}
-            title={`Quarter turn in the ${AXIS_RING_PLANE[axis]} plane (${keys[axis]}) — left sweeps one way, right the other`}
+            title={`Quarter turn in the ${AXIS_RING_PLANE[axis]} plane (${badge(axis)}) — left sweeps one way, right the other`}
             /*
              * R3F listens on the canvas container, which is an ancestor of this
              * overlay, so an unstopped event would also be raycast into the scene and
@@ -993,7 +1019,7 @@ function RotationHandles({
             onPointerEnter={() => setHovered(axis)}
             onPointerLeave={() => setHovered(null)}
           >
-            {keys[axis]}
+            {badge(axis)}
           </button>
         </Html>
       ))}
@@ -1006,7 +1032,7 @@ function RotationHandles({
           style={{ pointerEvents: "none" }}
         >
           <span className="dimension-label">
-            {keys[hovered]} · quarter turn in the {AXIS_RING_PLANE[hovered]} plane
+            {badge(hovered)} · quarter turn in the {AXIS_RING_PLANE[hovered]} plane
           </span>
         </Html>
       )}
@@ -3300,6 +3326,12 @@ export function ViewportCanvas(props: ViewportProps) {
 
   const [light, setLight] = useState<LightSettings>(loadLightSettings);
   const [lightPanelOpen, setLightPanelOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  /*
+   * The keys themselves, so the handler below and the hint that reads them out are
+   * both rebuilt the moment one is changed.
+   */
+  const keys = useSyncExternalStore(subscribeBindings, bindings);
 
   useEffect(() => {
     saveLightSettings(light);
@@ -3920,30 +3952,38 @@ export function ViewportCanvas(props: ViewportProps) {
     props.onBoxSelect,
   ]);
 
-  // Handle keyboard shortcuts
+  /*
+   * Keyboard shortcuts, by the action a keystroke stands for rather than by the key
+   * itself — which is what makes them rebindable, and what keeps the app's own chords
+   * out of here: Ctrl+Z reads as undo, an action this handler does not own, so it no
+   * longer turns the selection about z on its way to the history.
+   *
+   * The action is the same in every context; what it does depends on what is in hand.
+   */
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // Don't capture keystrokes when an input/textarea is focused (e.g. color hex input)
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
 
-      /*
-       * A Ctrl/Cmd chord belongs to the app's own shortcuts — undo, copy, group — and
-       * not to the bare letters below. Without this, Ctrl+Z turned the selection about
-       * z and the undo that followed in the same keystroke undid that very turn: undo
-       * looked like it did nothing, and nothing older could be reached at all while
-       * anything was selected.
-       */
-      if (e.ctrlKey || e.metaKey) return;
+      const action = actionOf(e);
+      if (!action) return;
+      const camera = () => (window as any).__camera as THREE.Camera | undefined;
 
-      if (e.key === "Escape") {
+      if (action === "shortcuts") {
+        e.preventDefault();
+        setShortcutsOpen(true);
+        return;
+      }
+
+      if (action === "cancel") {
         // The panel owns Escape while it is open
         if (lightPanelOpen) {
           setLightPanelOpen(false);
           return;
         }
         cancelCurrentAction();
-      } else if ((e.key === "Delete" || e.key === "Backspace") && props.selectedPartIds.size > 0) {
+      } else if (action === "delete" && props.selectedPartIds.size > 0) {
         props.onDeleteSelected();
       } else if (dragState) {
         const rotateDrag = (axis: 0 | 1 | 2) => {
@@ -3952,96 +3992,69 @@ export function ViewportCanvas(props: ViewportProps) {
           next[axis] = nextStep(next[axis]);
           setDragState({ ...dragState, rotation: next });
         };
-        switch (e.key.toLowerCase()) {
-          case "x":
-          case "y":
-          case "z": {
-            const camera = (window as any).__camera as THREE.Camera | undefined;
-            if (camera) rotateDrag(rotationAxesFromCamera(camera)[e.key.toLowerCase() as "x" | "y" | "z"]);
-            break;
+        const turn = TURN_AXIS[action];
+        if (turn) {
+          const cam = camera();
+          if (cam) rotateDrag(rotationAxesFromCamera(cam)[turn]);
+        } else if (action === "orient") {
+          const def = getPartDefinition(dragState.definitionId);
+          if (def?.category === "support") {
+            setAutoAim(false);
+            setDragState({ ...dragState, orientation: nextOrientation(dragState.orientation ?? "y") });
           }
-          case "o": {
-            const def = getPartDefinition(dragState.definitionId);
-            if (def?.category === "support") {
-              setAutoAim(false);
-              const newOrient = nextOrientation(dragState.orientation ?? "y");
-              setDragState({ ...dragState, orientation: newOrient });
-            }
-            break;
-          }
-          case "w":
-            setYLift((prev) => prev + 1);
-            break;
-          case "s":
-            setYLift((prev) => Math.max(0, prev - 1));
-            break;
+        } else if (action === "raise") {
+          setYLift((prev) => prev + 1);
+        } else if (action === "lower") {
+          setYLift((prev) => Math.max(0, prev - 1));
         }
       } else if (props.mode.type === "select" && props.selectedPartIds.size > 0) {
-        // Arrow key nudge, W/S lift, X/Y/Z rotation and O orientation for the selection
+        // Nudge, lift, turn and re-aim the selection. Shift makes a nudge finer and a
+        // turn go the other way.
         const fine = e.shiftKey ? 0.05 : 1;
-        if (ARROW_KEYS.has(e.key)) {
+        const nudge = NUDGE_STEP[action];
+        if (nudge) {
           e.preventDefault();
           // Same route to the camera the box-select projection already takes
-          const camera = (window as any).__camera as THREE.Camera | undefined;
+          const cam = camera();
           const orbit = (window as any).__controls as { target?: THREE.Vector3 } | undefined;
           const around = orbit?.target?.clone() ?? new THREE.Vector3();
-          const step = camera ? arrowGroundSteps(camera, around)[e.key] : undefined;
+          const step = cam ? arrowGroundSteps(cam, around)[nudge] : undefined;
           if (step) props.onNudgeParts(step[0] * fine, step[1] * fine, step[2] * fine);
           return;
         }
-        switch (e.key) {
-          case "w":
-          case "W":
-            props.onNudgeParts(0, fine, 0);
-            break;
-          case "s":
-          case "S":
-            props.onNudgeParts(0, -fine, 0);
-            break;
-          case "x":
-          case "X":
-          case "y":
-          case "Y":
-          case "z":
-          case "Z": {
-            const camera = (window as any).__camera as THREE.Camera | undefined;
-            if (camera) {
-              const axis = rotationAxesFromCamera(camera)[e.key.toLowerCase() as "x" | "y" | "z"];
-              // A press turns the part clockwise on the screen, shift the other way —
-              // which world direction that is depends on which side the camera is on
-              const pivot = props.rotationPivot ?? [0, 0, 0];
-              const clockwise = quarterTurnIsClockwise(camera, gridToWorld(pivot), axis);
-              const turns: 1 | 3 = clockwise === !e.shiftKey ? 1 : 3;
-              props.onRotateSelectedParts(axis, turns);
-            }
-            break;
+        const turn = TURN_AXIS[action];
+        if (turn) {
+          const cam = camera();
+          if (cam) {
+            const axis = rotationAxesFromCamera(cam)[turn];
+            // A press turns the part clockwise on the screen, shift the other way —
+            // which world direction that is depends on which side the camera is on
+            const pivot = props.rotationPivot ?? [0, 0, 0];
+            const clockwise = quarterTurnIsClockwise(cam, gridToWorld(pivot), axis);
+            const turns: 1 | 3 = clockwise === !e.shiftKey ? 1 : 3;
+            props.onRotateSelectedParts(axis, turns);
           }
-          case "o":
-          case "O":
-            props.onOrientSelectedParts();
-            break;
+        } else if (action === "raise") {
+          props.onNudgeParts(0, fine, 0);
+        } else if (action === "lower") {
+          props.onNudgeParts(0, -fine, 0);
+        } else if (action === "orient") {
+          props.onOrientSelectedParts();
         }
       } else if (props.mode.type === "place" || props.mode.type === "paste") {
-        switch (e.key.toLowerCase()) {
-          case "x":
-          case "y":
-          case "z": {
-            const camera = (window as any).__camera as THREE.Camera | undefined;
-            if (camera) rotateAxis(rotationAxesFromCamera(camera)[e.key.toLowerCase() as "x" | "y" | "z"]);
-            break;
+        const turn = TURN_AXIS[action];
+        if (turn) {
+          const cam = camera();
+          if (cam) rotateAxis(rotationAxesFromCamera(cam)[turn]);
+        } else if (action === "orient") {
+          if (isPlacingSupport) {
+            setAutoAim(false);
+            setGhostOrientation((prev) => nextOrientation(prev));
           }
-          case "o":
-            if (isPlacingSupport) {
-              setAutoAim(false);
-              setGhostOrientation((prev) => nextOrientation(prev));
-            }
-            break;
-          case "w":
-            setYLift((prev) => prev + 1);
-            break;
-          case "s":
-            setYLift((prev) => Math.max(0, prev - 1));
-            break;
+        } else if (action === "raise") {
+          setYLift((prev) => prev + 1);
+        } else if (action === "lower") {
+          setYLift((prev) => Math.max(0, prev - 1));
         }
       }
     };
@@ -4059,6 +4072,7 @@ export function ViewportCanvas(props: ViewportProps) {
     rotateAxis,
     dragState,
     lightPanelOpen,
+    keys,
   ]);
 
   // Shared by the Escape key and the right-click gesture
@@ -4114,29 +4128,37 @@ export function ViewportCanvas(props: ViewportProps) {
     e.preventDefault();
   }, []);
 
-  // Hint text
+  /*
+   * The hint, spelled with the keys as they are bound right now — it used to name keys
+   * of its own (T, R, F) that nothing answered to. Clicking it opens the full list.
+   */
+  const turnKeys = `${keyLabel("turn-x")}/${keyLabel("turn-y")}/${keyLabel("turn-z")}`;
+  const liftKeys = `${keyLabel("raise")}/${keyLabel("lower")}`;
+  const nudgeKeys = `${keyLabel("nudge-left")}${keyLabel("nudge-right")}${keyLabel("nudge-forward")}${keyLabel("nudge-back")}`;
+  const cancelKey = keyLabel("cancel");
+
   let hintText: string | null = null;
   if (dragState) {
     const dragDef = getPartDefinition(dragState.definitionId);
     hintText =
       dragDef?.category === "support"
-        ? "T(X) R(Y) F(Z) rotate · O orientation · W/S raise/lower · Release to place · Right-click or Esc cancel"
-        : "T(X) R(Y) F(Z) rotate · W/S raise/lower · Release to place · Right-click or Esc cancel";
+        ? `${turnKeys} rotate · ${keyLabel("orient")} orientation · ${liftKeys} raise/lower · Release to place · Right-click or ${cancelKey} cancel`
+        : `${turnKeys} rotate · ${liftKeys} raise/lower · Release to place · Right-click or ${cancelKey} cancel`;
   } else if (props.mode.type === "place") {
     hintText = isPlacingSupport
-      ? "Click to place · T(X) R(Y) F(Z) rotate · O orientation · W/S raise/lower · Right-click or Esc cancel"
-      : "Click to place · T(X) R(Y) F(Z) rotate · W/S raise/lower · Right-click or Esc cancel";
+      ? `Click to place · ${turnKeys} rotate · ${keyLabel("orient")} orientation · ${liftKeys} raise/lower · Right-click or ${cancelKey} cancel`
+      : `Click to place · ${turnKeys} rotate · ${liftKeys} raise/lower · Right-click or ${cancelKey} cancel`;
   } else if (props.mode.type === "draw") {
     hintText =
       props.mode.axis === "vertical"
-        ? "Click a cell and drag up to stand a support · Right-click or Esc cancel"
-        : "Drag across the ground to lay down a support · Right-click or Esc cancel";
+        ? `Click a cell and drag up to stand a support · Right-click or ${cancelKey} cancel`
+        : `Drag across the ground to lay down a support · Right-click or ${cancelKey} cancel`;
   } else if (props.mode.type === "select" && props.selectedPartIds.size > 0) {
     hintText = selectedResizable
-      ? "Drag face handles to resize · Suggested parts appear on the right · Del delete · Right-click or Esc deselect"
-      : "Arrow keys nudge · Shift+arrow fine nudge · w/s up and down · x/y/z turn in the xz, xy and yz planes, shift to reverse · ctrl-c/v copy/paste · Del delete · Right-click or Esc deselect";
+      ? `Drag face handles to resize · Suggested parts appear on the right · ${keyLabel("delete")} delete · Right-click or ${cancelKey} deselect`
+      : `${nudgeKeys} nudge, Shift for finer · ${liftKeys} up and down · ${turnKeys} turn in the xz, xy and yz planes, Shift to reverse · ${keyLabel("copy")}/${keyLabel("paste")} copy/paste · ${keyLabel("delete")} delete · Right-click or ${cancelKey} deselect`;
   } else if (props.mode.type === "paste") {
-    hintText = `Click to paste ${props.mode.clipboard.parts.length} part(s) · T(X) R(Y) F(Z) rotate · Esc cancel`;
+    hintText = `Click to paste ${props.mode.clipboard.parts.length} part(s) · ${turnKeys} rotate · ${cancelKey} cancel`;
   }
 
   return (
@@ -4212,7 +4234,16 @@ export function ViewportCanvas(props: ViewportProps) {
         ))}
       {/* One flexible row: fixed left offsets could not take another control */}
       <div className="viewport-bottom">
-        {hintText && <div className="viewport-hint">{hintText}</div>}
+        {hintText && (
+          <button
+            type="button"
+            className="viewport-hint"
+            onClick={() => setShortcutsOpen(true)}
+            title="Every shortcut, and where to change them"
+          >
+            {hintText}
+          </button>
+        )}
         <div className="viewport-toolbelt">
           <button
             className={`viewport-shadow-toggle${light.shadows ? " viewport-mirror-toggle--on" : ""}`}
@@ -4294,6 +4325,14 @@ export function ViewportCanvas(props: ViewportProps) {
             Workspace
           </button>
           <button
+            className="viewport-workspace-toggle"
+            type="button"
+            onClick={() => setShortcutsOpen(true)}
+            title={`Every keyboard shortcut, and where to change them (${keyLabel("shortcuts")})`}
+          >
+            Keys
+          </button>
+          <button
             className={`viewport-connectors-toggle${!showRotationGuides ? " viewport-mirror-toggle--on" : ""}`}
             type="button"
             onClick={() => setShowRotationGuides((v) => !v)}
@@ -4334,6 +4373,7 @@ export function ViewportCanvas(props: ViewportProps) {
       {workspacePanelOpen && (
         <WorkspaceSettings size={workspace} onChange={setWorkspace} onClose={() => setWorkspacePanelOpen(false)} />
       )}
+      {shortcutsOpen && <KeyBindingsPanel onClose={() => setShortcutsOpen(false)} />}
       {boxSelectRect && (
         <div
           className="box-select-overlay"

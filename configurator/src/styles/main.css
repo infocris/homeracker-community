@@ -743,12 +743,20 @@
     align-self: center;
     max-width: calc(100% - 32px);
     background: rgba(0, 0, 0, 0.7);
+    border: 1px solid transparent;
     color: var(--text-primary);
     padding: 8px 16px;
     border-radius: 6px;
+    font-family: inherit;
     font-size: 12px;
     text-align: center;
-    pointer-events: none;
+    /* It reads out shortcuts, so it is also the way to the list of them */
+    pointer-events: auto;
+    cursor: pointer;
+  }
+
+  .viewport-hint:hover {
+    border-color: var(--accent);
   }
 
   .collision-computing-indicator {
@@ -1285,6 +1293,155 @@
   font-size: 11px;
   line-height: 1.4;
   color: var(--text-secondary);
+}
+
+/* Shortcuts */
+.keybindings {
+  width: 520px;
+  max-height: calc(100% - 64px);
+}
+
+.keybindings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.keybindings-group h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--accent);
+}
+
+.keybindings-group-note {
+  font-size: 10px;
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text-secondary);
+}
+
+.keybindings-row {
+  display: grid;
+  grid-template-columns: 1fr auto 24px;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.keybindings-name {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.keybindings-label {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.keybindings-detail {
+  font-size: 10px;
+  color: var(--text-secondary);
+}
+
+.keybindings-detail em {
+  font-style: normal;
+  color: var(--accent);
+  opacity: 0.8;
+}
+
+.keybindings-key {
+  min-width: 92px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.keybindings-key:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.keybindings-key:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.keybindings-key--recording {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #1a1a2e;
+}
+
+.keybindings-reset {
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.keybindings-reset:disabled {
+  opacity: 0.25;
+  cursor: default;
+}
+
+.keybindings-reset:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.keybindings-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.keybindings-message {
+  font-size: 11px;
+  color: var(--accent);
+  min-height: 14px;
+}
+
+.keybindings-reset-all {
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.keybindings-reset-all:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.keybindings-reset-all:hover:not(:disabled) {
+  border-color: var(--accent);
 }
 
 /*
