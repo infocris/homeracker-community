@@ -75,7 +75,7 @@ import {
 import { encodeAssemblyToHash, decodeAssemblyFromHash, hasCustomParts } from "../sharing/url-sharing";
 import { ACTIONS, actionOf, comboOf, conflictOf, isReserved, keysOf, resetKeys, setKeys } from "../input/keybindings";
 import { GestureLog } from "./GestureLog";
-import { gestureLogIsOn, logGesture, subscribeGestureLog } from "../debug/gesture-log";
+import { buttonsLabel, gestureLogIsOn, logGesture, subscribeGestureLog } from "../debug/gesture-log";
 
 /** True for an element that owns its own copy/paste/undo behaviour. */
 function isTextEntry(target: EventTarget | null): boolean {
@@ -402,6 +402,9 @@ export function App() {
       setReady(true);
     });
   }, []);
+
+  /** Whether the gesture log is on, which is what arms the probes below */
+  const logging = useSyncExternalStore(subscribeGestureLog, gestureLogIsOn);
 
   // Subscribe to assembly changes for re-renders
   const snapshot = useSyncExternalStore(
@@ -1263,6 +1266,38 @@ export function App() {
   }, [selectedPartIds, keepUnlocked]);
 
   /*
+   * Every press and release as the window itself sees it, before anything in the app
+   * has had a chance to act on it or hold it back.
+   *
+   * The viewport's own lines say what it was given; these say what arrived. Where the
+   * two disagree — a button whose press is missing here as well, or one that reaches
+   * the window and not the viewport — the difference is the answer, and no amount of
+   * reading the code will produce it.
+   */
+  useEffect(() => {
+    if (!logging) return;
+    const where = (target: EventTarget | null) => {
+      const element = target as HTMLElement | null;
+      if (!element?.tagName) return "?";
+      const className = typeof element.className === "string" ? element.className.split(" ")[0] : "";
+      return className ? `${element.tagName.toLowerCase()}.${className}` : element.tagName.toLowerCase();
+    };
+    const press = (e: PointerEvent) =>
+      logGesture("window press", `button ${e.button} · buttons ${buttonsLabel(e.buttons)} · on ${where(e.target)}`);
+    const release = (e: PointerEvent) =>
+      logGesture("window release", `button ${e.button} · buttons ${buttonsLabel(e.buttons)} · on ${where(e.target)}`);
+    const menu = (e: Event) => logGesture("window contextmenu", `on ${where(e.target)}`);
+    window.addEventListener("pointerdown", press, true);
+    window.addEventListener("pointerup", release, true);
+    window.addEventListener("contextmenu", menu, true);
+    return () => {
+      window.removeEventListener("pointerdown", press, true);
+      window.removeEventListener("pointerup", release, true);
+      window.removeEventListener("contextmenu", menu, true);
+    };
+  }, [logging]);
+
+  /*
    * The two things a gesture is answered by, written into the log as they change: what
    * the pointer is armed with, and what it has hold of. Which gesture did what is
    * otherwise left to be inferred from the scene.
@@ -1934,7 +1969,6 @@ export function App() {
   }, []);
 
   const [toast, setToast] = useState<string | null>(null);
-  const logging = useSyncExternalStore(subscribeGestureLog, gestureLogIsOn);
 
   const handleShare = useCallback(async () => {
     const data = assembly.serialize();

@@ -3909,6 +3909,26 @@ export function ViewportCanvas(props: ViewportProps) {
         if (held) verticalDragRef.current.used = true;
       }
 
+      /*
+       * The same reading, for the box the two buttons draw. A press of the second
+       * button does not always arrive — a mouse driver or a context menu can swallow
+       * it, and then the chord would never be noticed at all — but a move that carries
+       * both of them says the same thing, and says it every frame.
+       */
+      if (
+        !dragState &&
+        !boxSelectRef.current &&
+        !drawDragRef.current &&
+        props.mode.type === "select" &&
+        (e.buttons & 1) !== 0 &&
+        (e.buttons & 2) !== 0
+      ) {
+        pendingDragRef.current = null;
+        rightPressRef.current = null;
+        beginBoxGesture({ startX: e.clientX, startY: e.clientY });
+        logGesture("box select armed", "both buttons, seen on a move");
+      }
+
       // Box-select tracking
       const boxStart = boxSelectRef.current;
       if (boxStart) {
@@ -4055,11 +4075,14 @@ export function ViewportCanvas(props: ViewportProps) {
     boxSelectRect,
     props.parts,
     props.assembly,
+    props.mode,
     props.lockedPartIds,
     props.onLockedPartDrag,
     props.onMovePart,
     props.onClickPart,
     props.onBoxSelect,
+    beginBoxGesture,
+    endBoxGesture,
   ]);
 
   /*
