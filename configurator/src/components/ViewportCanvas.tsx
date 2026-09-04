@@ -647,7 +647,9 @@ function SuggestionPreview({
 }) {
   return (
     <group position={gridToWorld(position)}>
-      <Suspense fallback={<GhostFallback definitionId={definitionId} orientation={orientation} isSnapped />}>
+      <Suspense
+        fallback={<GhostFallback definitionId={definitionId} rotation={rotation} orientation={orientation} isSnapped />}
+      >
         <GhostModel definitionId={definitionId} rotation={rotation} orientation={orientation} isSnapped solid={solid} />
       </Suspense>
     </group>
@@ -1870,20 +1872,27 @@ function GhostModel({
   const def = getPartDefinition(definitionId);
   if (!def) return null;
 
+  /*
+   * Before the model path is looked at, because an imported part has none: asking for
+   * it first sent every one of them to the plain box below, which is drawn from the
+   * part's cells and knows nothing of how it has been turned. Dragging a rotated STL
+   * therefore showed a ghost still lying the way it was imported.
+   */
+  if (isCustomPart(definitionId)) {
+    return (
+      <CustomGhostModel definitionId={definitionId} rotation={rotation} isSnapped={isSnapped} isUnsound={isUnsound} />
+    );
+  }
+
   if (!def.modelPath) {
     return (
       <GhostFallback
         definitionId={definitionId}
+        rotation={rotation}
         orientation={orientation}
         isSnapped={isSnapped}
         isUnsound={isUnsound}
       />
-    );
-  }
-
-  if (isCustomPart(definitionId)) {
-    return (
-      <CustomGhostModel definitionId={definitionId} rotation={rotation} isSnapped={isSnapped} isUnsound={isUnsound} />
     );
   }
 
@@ -2003,11 +2012,13 @@ function CustomGhostModel({
 /** Fallback box while the ghost GLB is loading, or for a part with no model */
 function GhostFallback({
   definitionId,
+  rotation,
   orientation,
   isSnapped,
   isUnsound,
 }: {
   definitionId: string;
+  rotation?: Rotation3;
   orientation?: Axis;
   isSnapped?: boolean;
   isUnsound?: boolean;
@@ -2016,7 +2027,8 @@ function GhostFallback({
   if (!def) return null;
 
   const orient = orientation ?? "y";
-  const cells = def.gridCells.map((c) => transformCell(c, orient));
+  // Turned first and then aimed, the order every other reading of a part's cells takes
+  const cells = rotateGridCells(def.gridCells, rotation ?? IDENTITY_ROTATION).map((c) => transformCell(c, orient));
   const offset = modelCenterOffset({ gridCells: cells });
 
   const minX = Math.min(...cells.map((c) => c[0]));
@@ -2031,7 +2043,7 @@ function GhostFallback({
   const sizeZ = (maxZ - minZ + 1) * BASE_UNIT;
   const color = ghostColor(isSnapped, isUnsound);
 
-  // No rotation needed — box dimensions already reflect oriented space
+  // No rotation on the mesh — the box already spans the turned and aimed cells
   return (
     <mesh position={offset}>
       <boxGeometry args={[sizeX * 0.95, sizeY * 0.95, sizeZ * 0.95]} />
@@ -2354,7 +2366,12 @@ function GhostPreview({
     <group name="ghost-preview" position={worldPos} onClick={handleGhostClick}>
       <Suspense
         fallback={
-          <GhostFallback definitionId={definitionId} orientation={effectiveOrientation} isUnsound={isUnsound} />
+          <GhostFallback
+            definitionId={definitionId}
+            rotation={effectiveRotation}
+            orientation={effectiveOrientation}
+            isUnsound={isUnsound}
+          />
         }
       >
         <GhostModel
@@ -2536,6 +2553,7 @@ function DragPreview({
           fallback={
             <GhostFallback
               definitionId={dragState.definitionId}
+              rotation={dragState.rotation}
               orientation={effectiveOrientation}
               isUnsound={isUnsound}
             />
@@ -2562,7 +2580,15 @@ function DragPreview({
             const wp = gridToWorld(offsetPos);
             return (
               <group key={p.instanceId} name={`drag-preview-${p.instanceId}`} position={wp}>
-                <Suspense fallback={<GhostFallback definitionId={p.definitionId} orientation={p.orientation ?? "y"} />}>
+                <Suspense
+                  fallback={
+                    <GhostFallback
+                      definitionId={p.definitionId}
+                      rotation={p.rotation}
+                      orientation={p.orientation ?? "y"}
+                    />
+                  }
+                >
                   <GhostModel
                     definitionId={p.definitionId}
                     rotation={p.rotation}
@@ -2779,7 +2805,9 @@ function PasteGhostPreview({
         const rot = addRotations(cp.rotation, ghostRotation);
         return (
           <group key={i} position={worldPos}>
-            <Suspense fallback={<GhostFallback definitionId={cp.definitionId} orientation={cp.orientation} />}>
+            <Suspense
+              fallback={<GhostFallback definitionId={cp.definitionId} rotation={rot} orientation={cp.orientation} />}
+            >
               <GhostModel
                 definitionId={cp.definitionId}
                 rotation={rot}
