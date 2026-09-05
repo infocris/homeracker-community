@@ -412,9 +412,16 @@ function ViewportInsets({
   };
 
   useFrame(() => {
-    const ratio = gl.getPixelRatio();
-    const width = Math.max(1, Math.round(size.width * ratio));
-    const height = Math.max(1, Math.round(size.height * ratio));
+    /*
+     * CSS pixels, not device pixels: three.js multiplies whatever it is given here by
+     * the renderer's pixel ratio. Handing it device pixels squares the ratio, and on a
+     * retina screen the whole viewport comes out twice the size of the canvas — the
+     * main view drawn at 2× and the middle of it filling the frame. Worse, the setting
+     * outlives these insets, so the view stays magnified long after the close-ups are
+     * gone, with every click landing somewhere other than where it looks.
+     */
+    const width = Math.max(1, size.width);
+    const height = Math.max(1, size.height);
 
     gl.setScissorTest(false);
     gl.setViewport(0, 0, width, height);
