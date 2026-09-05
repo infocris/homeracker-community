@@ -90,9 +90,10 @@ export function rotateBlock(
   /** Quarter turns to make, in the direction asked for: 2 is the half turn between */
   turns: 1 | 2 | 3,
   /**
-   * The cell to turn about, when the caller has one in mind — a spot picked on a part,
-   * or the middle of what is selected. Without one the body turns about the cell
-   * nearest the middle of its own cells, worked out here.
+   * The cell to turn about, when the caller has one in mind. A lone part turns about
+   * its own anchor, so its far end sweeps the ring through four distinct places like a
+   * clock hand; about the middle instead, a symmetric bar would fall back onto its own
+   * cells at half a turn and only ever show two.
    */
   pivotOverride?: GridPosition,
 ): TurnedPart[] | null {

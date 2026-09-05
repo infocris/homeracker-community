@@ -287,6 +287,8 @@ function resolveRotationPivot(
     return [...held.cell] as GridPosition;
   }
 
+  if (selected.length === 1) return [...selected[0].position] as GridPosition;
+
   const min: GridPosition = [Infinity, Infinity, Infinity];
   const max: GridPosition = [-Infinity, -Infinity, -Infinity];
   for (const part of selected) {
