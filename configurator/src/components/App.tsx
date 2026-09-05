@@ -260,8 +260,14 @@ function removeMatchingParts(specs: PartSpec[]): void {
 
 /**
  * The cell the next turn pivots about: a spot picked on the part if there is one, the
- * pivot a run of turns is already holding, a lone part's own anchor, or the cell
- * nearest the middle of a set turning as one body.
+ * pivot a run of turns is already holding, or the cell nearest the middle of what is
+ * selected — one part or a set of them.
+ *
+ * The middle, not the anchor. A part's anchor is the min corner of its cells, so a
+ * bulky one turned about it swept a wide arc and landed a long way from where it was
+ * put; about its middle it turns on the spot. The cost is that a part symmetric about
+ * that middle comes back onto its own cells at a half turn, where turning about the
+ * corner would have moved it to the other side of the anchor.
  *
  * A plain function, so the turn and the rings that offer it read the same answer from
  * the same inputs. Going through a ref assigned during render was not reliable — the
@@ -280,8 +286,6 @@ function resolveRotationPivot(
   if (held && held.ids.length === selected.length && held.ids.every((id) => ids.has(id))) {
     return [...held.cell] as GridPosition;
   }
-
-  if (selected.length === 1) return [...selected[0].position] as GridPosition;
 
   const min: GridPosition = [Infinity, Infinity, Infinity];
   const max: GridPosition = [-Infinity, -Infinity, -Infinity];
