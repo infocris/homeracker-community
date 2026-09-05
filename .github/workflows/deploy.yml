@@ -49,6 +49,10 @@ jobs:
             cp "$f" "configurator/_site/$f"
           done
       - uses: docker://pandoc/core:latest
+        # The filter reads this to write the page in the name of whoever is publishing
+        # it, so a fork's site points at the fork rather than at upstream
+        env:
+          GITHUB_REPOSITORY: ${{ github.repository }}
         with:
           args: >-
             --standalone
