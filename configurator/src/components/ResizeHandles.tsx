@@ -35,6 +35,8 @@ interface ResizeHandlesProps {
   /** Extent of that box in grid cells */
   size: [number, number, number];
   onPreview: (preview: ResizePreview | null) => void;
+  /** Pointer over one of the handles, so the corner can say what a drag would do */
+  onHover?: (over: boolean) => void;
   onResize: (instanceId: string, position: GridPosition, size: [number, number, number]) => void;
   onDraggingChange?: (dragging: boolean) => void;
 }
@@ -222,12 +224,14 @@ function LengthHandle({
   size,
   active,
   onPointerDown,
+  onHover,
 }: {
   face: LengthFace;
   position: GridPosition;
   size: [number, number, number];
   active: boolean;
   onPointerDown: (face: LengthFace, e: PointerEvent) => void;
+  onHover?: (over: boolean) => void;
 }) {
   const worldPos = faceHandleWorldPos(position, size, face);
   return (
@@ -237,6 +241,11 @@ function LengthHandle({
         e.stopPropagation();
         onPointerDown(face, e.nativeEvent);
       }}
+      onPointerOver={(e) => {
+        e.stopPropagation();
+        onHover?.(true);
+      }}
+      onPointerOut={() => onHover?.(false)}
     >
       <sphereGeometry args={[BASE_UNIT * 0.28, 16, 16]} />
       <meshStandardMaterial
@@ -248,7 +257,15 @@ function LengthHandle({
   );
 }
 
-export function ResizeHandles({ part, origin, size, onPreview, onResize, onDraggingChange }: ResizeHandlesProps) {
+export function ResizeHandles({
+  part,
+  origin,
+  size,
+  onPreview,
+  onResize,
+  onDraggingChange,
+  onHover,
+}: ResizeHandlesProps) {
   const { camera, gl, controls } = useThree();
 
   const basePos = origin;
@@ -256,6 +273,8 @@ export function ResizeHandles({ part, origin, size, onPreview, onResize, onDragg
 
   const dragRef = useRef<{
     face: LengthFace;
+    /** The pointer the canvas captured on the press, so it can always be handed back */
+    pointerId: number;
     /** Cell at the far end from the handle: the bar grows and swings about this */
     pivot: GridPosition;
     axis: LengthAxis;
@@ -278,6 +297,10 @@ export function ResizeHandles({ part, origin, size, onPreview, onResize, onDragg
     },
     [controls, onDraggingChange],
   );
+
+  /** The freshest enabler, for the unmount safety below — that effect runs once */
+  const latestControlsEnabled = useRef(setControlsEnabled);
+  latestControlsEnabled.current = setControlsEnabled;
 
   useEffect(() => {
     if (dragRef.current) return; // don't clobber mid-drag
@@ -387,6 +410,7 @@ export function ResizeHandles({ part, origin, size, onPreview, onResize, onDragg
 
       dragRef.current = {
         face,
+        pointerId: e.pointerId,
         pivot,
         axis,
         startX: e.clientX,
@@ -415,17 +439,23 @@ export function ResizeHandles({ part, origin, size, onPreview, onResize, onDragg
     };
 
     const onUp = (e: PointerEvent) => {
+      /*
+       * The capture goes back first thing, whatever became of the drag. Held on past
+       * the release it would funnel every later pointer event into the canvas, and the
+       * toolbar, the panels and the turn badges would all stop answering — a viewport
+       * that only a reload could revive.
+       */
+      try {
+        gl.domElement.releasePointerCapture(e.pointerId);
+      } catch {
+        /* it was never taken, or is already back */
+      }
       const drag = dragRef.current;
       if (!drag) return;
       dragRef.current = null;
       setActiveFace(null);
       setControlsEnabled(true);
       onPreview(null);
-      try {
-        gl.domElement.releasePointerCapture(e.pointerId);
-      } catch {
-        /* ignore */
-      }
 
       const { latestPos, latestSize, originPos, originSize } = drag;
       const unchanged =
@@ -447,13 +477,32 @@ export function ResizeHandles({ part, origin, size, onPreview, onResize, onDragg
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onUp);
-      // Safety: never leave controls stuck disabled
-      if (dragRef.current) {
-        dragRef.current = null;
-        setControlsEnabled(true);
-      }
     };
   }, [gl, setControlsEnabled, onPreview, onResize, part.instanceId, resolveDrag]);
+
+  /*
+   * Safety on the way out only: a drag still in flight when the handles go would
+   * otherwise leave the orbit controls disabled for good, and the viewport with them.
+   *
+   * It cannot live in the cleanup above. That effect re-subscribes whenever one of the
+   * callbacks it closes over is handed down fresh, which a re-render of the viewport
+   * does routinely — and the press itself causes one. Wiping the drag there killed
+   * every drag on the frame it began.
+   */
+  useEffect(
+    () => () => {
+      if (dragRef.current) {
+        try {
+          gl.domElement.releasePointerCapture(dragRef.current.pointerId);
+        } catch {
+          /* it was never taken, or is already back */
+        }
+        dragRef.current = null;
+        latestControlsEnabled.current(true);
+      }
+    },
+    [],
+  );
 
   const faces = lengthFacesForSize(display.size);
 
@@ -467,6 +516,7 @@ export function ResizeHandles({ part, origin, size, onPreview, onResize, onDragg
           size={display.size}
           active={activeFace === face}
           onPointerDown={handlePointerDown}
+          onHover={onHover}
         />
       ))}
     </group>

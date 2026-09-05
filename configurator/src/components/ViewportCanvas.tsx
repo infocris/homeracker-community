@@ -934,11 +934,14 @@ function RotationHandles({
   centre,
   radii,
   onRotate,
+  onHover,
 }: {
   centre: [number, number, number];
   /** One radius per axis: how far the body reaches in that axis's plane of turn */
   radii: [number, number, number];
   onRotate: (axis: 0 | 1 | 2, turns: 1 | 3) => void;
+  /** Pointer over one of the badges, so the corner can say what a press does */
+  onHover?: (over: boolean) => void;
 }) {
   const [hovered, setHovered] = useState<number | null>(null);
   const camera = useThree((state) => state.camera);
@@ -1049,8 +1052,14 @@ function RotationHandles({
               e.stopPropagation();
               e.preventDefault();
             }}
-            onPointerEnter={() => setHovered(axis)}
-            onPointerLeave={() => setHovered(null)}
+            onPointerEnter={() => {
+              setHovered(axis);
+              onHover?.(true);
+            }}
+            onPointerLeave={() => {
+              setHovered(null);
+              onHover?.(false);
+            }}
           >
             {badge(axis)}
           </button>
@@ -1459,16 +1468,29 @@ function mouseHintsFor(
   dragState: DragState | null,
   drawing: boolean,
   overPart: boolean,
+  handle: HandleKind | null,
+  holdingHandle: boolean,
 ): MouseHints {
   if (dragState) {
     return { left: "Release to drop", right: "Hold for height", middle: "—" };
   }
   if (drawing) return { left: "Release to draw the bar", right: "Cancel" };
+  if (holdingHandle) return { left: "Release to set the length", right: "—", middle: "—" };
+  switch (handle) {
+    case "connector-side-trade":
+      return { left: "Click to trade the connector · drag to draw a bar", right: "—", middle: "—" };
+    case "connector-side":
+      return { left: "Drag to draw a bar out of this side", right: "—", middle: "—" };
+    case "resize":
+      return { left: "Drag to set the length", right: "—", middle: "—" };
+    case "turn":
+      return { left: "A quarter turn", right: "A quarter turn the other way", middle: "—" };
+  }
   switch (mode.type) {
     case "place":
       return { left: "Click to place", right: "Cancel", middle: "—" };
     case "paste":
-      return { left: "Click to paste", right: "Cancel", middle: "—" };
+      return { left: "Click to paste", right: "Cancel", middle: "Turn it: flat, upright, back" };
     case "draw":
       return { left: "Drag to draw a bar", right: "Cancel", middle: "—" };
     default:
@@ -1477,7 +1499,7 @@ function mouseHintsFor(
             left: "Select · drag to move it about",
             middle: "Duplicate",
             right: "Select · drag to move it in height",
-            both: "Selection box",
+            both: "Add to the selection · drag for a box",
           }
         : { left: "Turn the view", middle: "Pan the view", right: "Pan · a click deselects", both: "Selection box" };
   }
@@ -1489,6 +1511,13 @@ const HINT_ROWS: { key: keyof MouseHints; label: string; buttons: MouseButton[] 
   { key: "right", label: "R", buttons: ["right"] },
   { key: "both", label: "L+R", buttons: ["left", "right"] },
 ];
+
+/**
+ * A handle under the pointer, or being held. The corner answers for these too: a
+ * handle is a control of its own, and what a press on it does is not what a press on
+ * the part behind it would do.
+ */
+export type HandleKind = "connector-side" | "connector-side-trade" | "resize" | "turn";
 
 /** One key and what it does, for the corner's upper half */
 export interface KeyHint {
@@ -2894,10 +2923,12 @@ function PasteGhostPreview({
     syncRef: pasteStateRef,
   });
 
+  // What the copy is turned to, for the e2e suite — the same value the click uses
+  (window as any).__pasteTurn = ghostRotation;
+
   const handlePasteClick = (e: any) => {
     e.stopPropagation();
     const ps = pasteStateRef.current;
-    console.log("[PasteGhostPreview] onClick — pasting at", ps.position, "rotation", ghostRotation);
     onPasteParts(clipboard, ps.position, ghostRotation);
   };
 
@@ -2961,6 +2992,9 @@ interface SceneProps extends ViewportProps {
   onDrawPointerUp: () => void;
   resizePreview: ResizePreview | null;
   onResizePreview: (preview: ResizePreview | null) => void;
+  /** A handle under the pointer, and one being held — for the corner */
+  onHandleHover: (kind: HandleKind | null) => void;
+  onHandleDrag: (holding: boolean) => void;
   selectedResizable: { part: PlacedPart; origin: GridPosition; size: [number, number, number] } | null;
   /** Connectors ghosted out of the way of a selected support */
   fadedPartIds: Set<string>;
@@ -3022,6 +3056,8 @@ function Scene({
   onDrawPointerUp,
   resizePreview,
   onResizePreview,
+  onHandleHover,
+  onHandleDrag,
   selectedResizable,
   selectionBody,
   fadedPartIds,
@@ -3036,6 +3072,21 @@ function Scene({
 }: SceneProps) {
   const groundRef = useRef<THREE.Mesh>(null);
   const [handleDragging, setHandleDragging] = useState(false);
+
+  /*
+   * Handed down as they are, so the handles keep the same functions from render to
+   * render. The resize handles hang their window listeners off these, and a fresh
+   * function each render would tear those listeners down mid-drag.
+   */
+  const handleResizeDragging = useCallback(
+    (dragging: boolean) => {
+      setHandleDragging(dragging);
+      onHandleDrag(dragging);
+    },
+    [onHandleDrag],
+  );
+  const handleResizeHover = useCallback((over: boolean) => onHandleHover(over ? "resize" : null), [onHandleHover]);
+  const handleTurnHover = useCallback((over: boolean) => onHandleHover(over ? "turn" : null), [onHandleHover]);
 
   const gridFromPointerEvent = useCallback((e: { point?: THREE.Vector3 }) => {
     if (e.point) {
@@ -3381,7 +3432,12 @@ function Scene({
       })}
 
       {showRotationGuides && selectionBody && turnableSelection && mode.type === "select" && !dragState && (
-        <RotationHandles centre={selectionBody.centre} radii={selectionBody.radii} onRotate={onRotateSelectedParts} />
+        <RotationHandles
+          centre={selectionBody.centre}
+          radii={selectionBody.radii}
+          onRotate={onRotateSelectedParts}
+          onHover={handleTurnHover}
+        />
       )}
 
       {freeSpots && mode.type === "select" && !dragState && (
@@ -3389,7 +3445,8 @@ function Scene({
           cell={freeSpots.cell}
           spots={freeSpots.spots}
           onGrow={(spot) => spot.grow && onGrowConnector(freeSpots.instanceId, spot.grow.def.id, spot.grow.rotation)}
-          onPreview={(spot) =>
+          onPreview={(spot) => {
+            onHandleHover(spot ? (spot.grow ? "connector-side-trade" : "connector-side") : null);
             onPreviewConnector(
               spot?.grow
                 ? {
@@ -3399,8 +3456,8 @@ function Scene({
                     replaces: freeSpots.instanceId,
                   }
                 : null,
-            )
-          }
+            );
+          }}
           onDrawFrom={onDrawFromSpot}
           onCancelDraw={onCancelDraw}
         />
@@ -3414,7 +3471,8 @@ function Scene({
             size={selectedResizable.size}
             onPreview={onResizePreview}
             onResize={onResizePart}
-            onDraggingChange={setHandleDragging}
+            onDraggingChange={handleResizeDragging}
+            onHover={handleResizeHover}
           />
         </>
       )}
@@ -3516,6 +3574,9 @@ export function ViewportCanvas(props: ViewportProps) {
   const [light, setLight] = useState<LightSettings>(loadLightSettings);
   const [lightPanelOpen, setLightPanelOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  /** A handle under the pointer, and whether one is being held */
+  const [hoveredHandle, setHoveredHandle] = useState<HandleKind | null>(null);
+  const [holdingHandle, setHoldingHandle] = useState(false);
   /*
    * The keys themselves, so the handler below and the hint that reads them out are
    * both rebuilt the moment one is changed.
@@ -3908,14 +3969,22 @@ export function ViewportCanvas(props: ViewportProps) {
    * window listeners read it from a closure that outlives the render.
    */
   const boxGestureRef = useRef(false);
+  /**
+   * The part the gesture began on, if any. Both buttons held stand for Shift, and Shift
+   * over a part means add it to the selection rather than draw a box round nothing — so
+   * a chord that never travels finishes as that click instead.
+   */
+  const boxGestureOnPartRef = useRef<string | null>(null);
   const [boxGesture, setBoxGesture] = useState(false);
-  const beginBoxGesture = useCallback((start: { startX: number; startY: number }) => {
+  const beginBoxGesture = useCallback((start: { startX: number; startY: number }, onPart?: string | null) => {
     boxSelectRef.current ??= start;
     boxGestureRef.current = true;
+    boxGestureOnPartRef.current = onPart ?? null;
     setBoxGesture(true);
   }, []);
   const endBoxGesture = useCallback(() => {
     boxGestureRef.current = false;
+    boxGestureOnPartRef.current = null;
     setBoxGesture(false);
   }, []);
   const [boxSelectRect, setBoxSelectRect] = useState<{
@@ -4000,7 +4069,19 @@ export function ViewportCanvas(props: ViewportProps) {
    * the part; travelled, it was the camera being panned — the same bargain the right
    * button strikes between cancelling and panning.
    */
-  const middlePressRef = useRef<{ x: number; y: number; instanceId: string } | null>(null);
+  const middlePressRef = useRef<{ x: number; y: number; instanceId?: string } | null>(null);
+
+  /**
+   * The three ways a copy on the cursor can be laid down, in the order the middle
+   * button walks through them: as it was, turned in the ground plane, tipped upright.
+   * The same button that made the copy turns it over, which is where a hand goes
+   * looking for it.
+   */
+  const PASTE_TURNS: Rotation3[] = [
+    [0, 0, 0],
+    [0, 90, 0],
+    [90, 0, 0],
+  ];
 
   // Handle pointer down on a part — records pending drag start
   const handlePartPointerDown = useCallback(
@@ -4054,9 +4135,12 @@ export function ViewportCanvas(props: ViewportProps) {
         (e.buttons & 1) !== 0 &&
         (e.buttons & 2) !== 0
       ) {
+        const onPart = pendingDragRef.current?.instanceId ?? null;
         pendingDragRef.current = null;
         rightPressRef.current = null;
-        beginBoxGesture({ startX: e.clientX, startY: e.clientY });
+        // The part the first button came down on travels with the gesture: held still,
+        // the chord finishes as a Shift+click on it rather than as a box round nothing
+        beginBoxGesture({ startX: e.clientX, startY: e.clientY }, onPart);
         logGesture("box select armed", "both buttons, seen on a move");
       }
 
@@ -4124,6 +4208,13 @@ export function ViewportCanvas(props: ViewportProps) {
     const handlePointerUp = (e: PointerEvent) => {
       // Box-select finalize
       if (boxSelectRef.current) {
+        /*
+         * Held still over a part: the chord stands for Shift, and Shift over a part
+         * adds it to the selection. A box of no width would have caught nothing.
+         */
+        if (!boxSelectRect && boxGestureOnPartRef.current) {
+          props.onClickPart(boxGestureOnPartRef.current, true);
+        }
         if (boxSelectRect) {
           // Project each part to screen space and check if inside the rect
           const camera = (window as any).__camera as THREE.Camera | undefined;
@@ -4375,11 +4466,17 @@ export function ViewportCanvas(props: ViewportProps) {
        */
       logGesture("press", `button ${e.button} · buttons ${buttonsLabel(e.buttons)} · mode ${props.mode.type}`);
 
+      if (e.button === 1 && props.mode.type === "paste" && !middlePressRef.current) {
+        // Nothing is decided until the release: a middle drag is still the camera's
+        middlePressRef.current = { x: e.clientX, y: e.clientY };
+      }
+
       const bothButtons = (e.buttons & 1) !== 0 && (e.buttons & 2) !== 0;
       if (bothButtons && props.mode.type === "select" && !dragState) {
+        const onPart = pendingDragRef.current?.instanceId ?? null;
         pendingDragRef.current = null;
         rightPressRef.current = null;
-        beginBoxGesture({ startX: e.clientX, startY: e.clientY });
+        beginBoxGesture({ startX: e.clientX, startY: e.clientY }, onPart);
         logGesture("box select armed", "both buttons — the camera is held still");
         return;
       }
@@ -4419,6 +4516,16 @@ export function ViewportCanvas(props: ViewportProps) {
         if (!middle) return; // the press began on empty space: the camera's business
         if (Math.hypot(e.clientX - middle.x, e.clientY - middle.y) >= DRAG_THRESHOLD) {
           logGesture("middle drag", "the camera panned; nothing duplicated");
+          return;
+        }
+        if (!middle.instanceId) {
+          // A copy already on the cursor: the same button turns it over instead
+          setGhostRotation((prev) => {
+            const at = PASTE_TURNS.findIndex((turn) => turn.every((step, i) => step === prev[i]));
+            return PASTE_TURNS[(at + 1) % PASTE_TURNS.length];
+          });
+          setAutoAim(false);
+          logGesture("turn the copy", "middle-click, in paste mode");
           return;
         }
         logGesture("duplicate", "a copy goes on the cursor");
@@ -4477,11 +4584,16 @@ export function ViewportCanvas(props: ViewportProps) {
       { key: cancelKey, action: `cancel · ${props.mode.clipboard.parts.length} part(s) on the cursor` },
     ];
   } else if (props.selectedPartIds.size > 0) {
+    // Grouping only makes sense with two parts to tie, and untying only where one of
+    // them is tied already — a key named for something that cannot happen is noise
+    const grouped = props.parts.some((part) => props.selectedPartIds.has(part.instanceId) && part.groupId);
     keyHints = [
       { key: nudgeKeys, action: "nudge · Shift for finer" },
       { key: liftKeys, action: "up / down" },
       { key: turnKeys, action: "rotate · Shift to reverse" },
       ...(selectedResizable ? [{ key: keyLabel("orient"), action: "orientation" }] : []),
+      ...(props.selectedPartIds.size > 1 ? [{ key: keyLabel("group"), action: "group as one body" }] : []),
+      ...(grouped ? [{ key: keyLabel("ungroup"), action: "ungroup" }] : []),
       { key: `${keyLabel("copy")}/${keyLabel("paste")}`, action: "copy / paste" },
       { key: keyLabel("delete"), action: "delete" },
       { key: cancelKey, action: "deselect" },
@@ -4528,6 +4640,8 @@ export function ViewportCanvas(props: ViewportProps) {
           onDrawPointerUp={handleDrawPointerUp}
           resizePreview={resizePreview}
           onResizePreview={setResizePreview}
+          onHandleHover={setHoveredHandle}
+          onHandleDrag={setHoldingHandle}
           selectedResizable={selectedResizable}
           selectionBody={selectionBody}
           fadedPartIds={fadedPartIds}
@@ -4686,7 +4800,7 @@ export function ViewportCanvas(props: ViewportProps) {
           </div>
           <ControlsCorner
             keyHints={keyHints}
-            hints={mouseHintsFor(props.mode, dragState, !!drawDrag, !!hoveredPartId)}
+            hints={mouseHintsFor(props.mode, dragState, !!drawDrag, !!hoveredPartId, hoveredHandle, holdingHandle)}
             onOpenShortcuts={() => setShortcutsOpen(true)}
           />
         </div>
