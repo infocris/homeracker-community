@@ -1,4 +1,4 @@
-import { test, expect, clickCatalogItem } from "./fixtures";
+import { test, expect, clickCatalogItem, expandCatalog } from "./fixtures";
 
 test.describe("Layout", () => {
   test("app container and panels render", async ({ appPage: page }) => {
@@ -22,6 +22,7 @@ test.describe("Layout", () => {
 
 test.describe("Catalog", () => {
   test("has 36 items and none active initially", async ({ appPage: page }) => {
+    await expandCatalog(page);
     const catalogItems = await page.evaluate(() => {
       const items = document.querySelectorAll(".catalog-item");
       return Array.from(items).map((el) => ({
@@ -35,6 +36,7 @@ test.describe("Catalog", () => {
   });
 
   test("contains expected part names", async ({ appPage: page }) => {
+    await expandCatalog(page);
     const catalogNames = await page.evaluate(() => {
       const items = document.querySelectorAll(".catalog-item");
       return Array.from(items).map((el) => el.querySelector(".catalog-item-name")?.textContent?.trim() ?? "");

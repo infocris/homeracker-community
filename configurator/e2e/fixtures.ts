@@ -15,25 +15,54 @@ export async function waitForApp(page: Page) {
 }
 
 /**
+ * Unfold every catalog section.
+ *
+ * The catalog starts folded away — eighty parts is a wall, and a session lives in one
+ * or two corners of it — so a part is only in the page once its section has been
+ * opened. Every helper that looks for a part opens them first, which is what a hand
+ * does too.
+ */
+export async function expandCatalog(page: Page) {
+  // The headings first: the sidebar may still be mounting, and clicks would land on
+  // nothing. Then one pass of clicks, and only then the wait — clicking again on each
+  // poll would toggle shut a section whose first click had not rendered yet.
+  await page.waitForSelector(".catalog-section-title", { timeout: 10_000 });
+  await page.evaluate(() => {
+    for (const title of document.querySelectorAll(".catalog-section-title")) {
+      if (title.textContent?.trim().startsWith("\u25b8")) (title as HTMLElement).click();
+    }
+  });
+  await page.waitForFunction(() => document.querySelectorAll(".catalog-item").length > 0, { timeout: 10_000 });
+}
+
+/**
  * Click a catalog item by its display name.
  */
 export async function clickCatalogItem(page: Page, name: string) {
-  await page.evaluate((n) => {
-    const items = document.querySelectorAll(".catalog-item");
-    for (const item of items) {
-      if (item.querySelector(".catalog-item-name")?.textContent?.trim() === n) {
-        (item as HTMLElement).click();
-        return;
+  await expandCatalog(page);
+  // Clicked as soon as it is there: the sections were opened a moment ago and the one
+  // holding this part may still be rendering, in which case a single look would find
+  // nothing and the wait below would time out on a click that never happened
+  await page.waitForFunction(
+    (n) => {
+      for (const item of document.querySelectorAll(".catalog-item")) {
+        if (item.querySelector(".catalog-item-name")?.textContent?.trim() === n) {
+          (item as HTMLElement).click();
+          return true;
+        }
       }
-    }
-  }, name);
+      return false;
+    },
+    name,
+    { timeout: 10_000 },
+  );
   // Wait for React to process the click
   await page.waitForFunction(
     (n) =>
       !!document.querySelector(".catalog-item.active .catalog-item-name") ||
       document.querySelector(".viewport")?.getAttribute("data-placing") != null,
     name,
-    { timeout: 3_000 },
+    { timeout: 5_000 },
   );
 }
 

@@ -9,7 +9,11 @@ import {
   deleteUnusedCustomParts,
   downloadCustomPart,
   replaceCustomPart,
+  renameCustomPart,
+  createPrimitivePart,
 } from "../data/custom-parts";
+import type { PrimitiveDimensions } from "../data/primitives";
+import { ShapeDialog } from "./ShapeDialog";
 import { useThumbnail } from "../thumbnails/useThumbnail";
 import type {
   Axis,
@@ -100,6 +104,16 @@ const SECTIONS: {
     filter: (p) => p.category === "lockpin",
   },
 ];
+
+/**
+ * The sections that start folded away, which is all of the catalog proper.
+ *
+ * The list runs to some eighty parts, and a session spends its time in one or two
+ * corners of it — or in Custom, which is the one section left open, since what is in
+ * there was put there by whoever is looking. Every section remembers being opened, so
+ * this is only where a browser that has never opened one begins.
+ */
+const FOLDED_TO_BEGIN_WITH = ["connector", "connector-pt", "support", "connector-foot", "lockpin", "other"];
 
 function getCategoryIcon(category: PartCategory): string {
   switch (category) {
@@ -230,14 +244,32 @@ export function Sidebar({
   const [collapsed, setCollapsed] = useState<Set<string>>(() => {
     try {
       const saved = localStorage.getItem("homeracker-collapsed");
-      return saved ? new Set(JSON.parse(saved)) : new Set();
+      return saved ? new Set(JSON.parse(saved)) : new Set(FOLDED_TO_BEGIN_WITH);
     } catch {
-      return new Set();
+      return new Set(FOLDED_TO_BEGIN_WITH);
     }
   });
 
   // Subscribe to custom parts changes
   const customSnapshot = useSyncExternalStore(subscribeCustomParts, getCustomPartsSnapshot);
+
+  const [shapeDialogOpen, setShapeDialogOpen] = useState(false);
+  /** The custom part being renamed, and the name being typed for it */
+  const [renaming, setRenaming] = useState<{ id: string; draft: string } | null>(null);
+
+  /** A shape drawn in the app lands in Custom beside the imported models */
+  const handleCreateShape = useCallback(
+    async (dimensions: PrimitiveDimensions, name: string) => {
+      setShapeDialogOpen(false);
+      try {
+        const def = await createPrimitivePart(dimensions, name);
+        onSelectPart(def.id);
+      } catch (err) {
+        console.error("Shape creation failed:", err);
+      }
+    },
+    [onSelectPart],
+  );
 
   const handleImportModel = useCallback(() => {
     const input = document.createElement("input");
@@ -543,7 +575,42 @@ export function Sidebar({
                   <div className="catalog-grid" style={{ marginBottom: 8 }}>
                     {customParts.map((part) => (
                       <div key={part.id} className="catalog-item-wrapper">
-                        {catalogItem(part)}
+                        {renaming?.id === part.id ? (
+                          <input
+                            className="catalog-item-rename"
+                            autoFocus
+                            value={renaming.draft}
+                            aria-label={`Name for ${part.name}`}
+                            onChange={(e) => setRenaming({ id: part.id, draft: e.target.value })}
+                            onBlur={() => {
+                              renameCustomPart(part.id, renaming.draft);
+                              setRenaming(null);
+                            }}
+                            onKeyDown={(e) => {
+                              e.stopPropagation();
+                              // Committed here rather than through a blur: the field is
+                              // not always the focused element — a name typed and
+                              // entered would then be dropped without a word
+                              if (e.key === "Enter") {
+                                renameCustomPart(part.id, renaming.draft);
+                                setRenaming(null);
+                              }
+                              if (e.key === "Escape") setRenaming(null);
+                            }}
+                          />
+                        ) : (
+                          catalogItem(part)
+                        )}
+                        <button
+                          className="catalog-item-rename-btn"
+                          title={`Rename ${part.name}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRenaming({ id: part.id, draft: part.name });
+                          }}
+                        >
+                          &#9998;
+                        </button>
                         <button
                           className="catalog-item-download"
                           title={`Download ${part.name}`}
@@ -595,6 +662,13 @@ export function Sidebar({
                   <button className="catalog-import-btn" onClick={handleImportModel}>
                     Import Model
                   </button>
+                  <button
+                    className="catalog-import-btn"
+                    title="Draw a box or a cylinder to your own measurements"
+                    onClick={() => setShapeDialogOpen(true)}
+                  >
+                    New Shape
+                  </button>
                   {customParts.some((p) => !usedDefinitionIds.has(p.id)) && (
                     <button
                       className="catalog-import-btn"
@@ -610,6 +684,7 @@ export function Sidebar({
           </div>
         );
       })()}
+      {shapeDialogOpen && <ShapeDialog onCreate={handleCreateShape} onClose={() => setShapeDialogOpen(false)} />}
     </div>
   );
 }

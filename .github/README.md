@@ -23,6 +23,10 @@ that a wrong assembly is harder to build than a right one.
 - A pick on the assembly places the next part at that spot, and the catalog narrows to the parts
   that fit there.
 - A working level to build above the ground, and a workspace whose size is yours to set.
+- Boxes and cylinders drawn to measure — dimensions in millimetres, the cells they will take
+  shown as they are typed — landing in Custom beside the imported models, where any of them can
+  be renamed in place.
+- The catalog starts folded: eighty parts is a wall, and a session lives in a corner of it.
 
 **Junctions**
 
@@ -37,10 +41,14 @@ that a wrong assembly is harder to build than a right one.
 
 **Selecting and editing**
 
+- Every transformation is read from where you stand. The three turn keys act on the axes
+  as the camera sees them — the ground plane, the plane facing you, the one running away
+  — and a press turns the part clockwise on screen, Shift the other way; the arrows move
+  it the way they point. Which world axis that is depends on the camera, not on the part,
+  so nothing has to be worked out twice before touching a key.
 - Parts grouped and handled as one body: selecting, moving, turning, colouring, deleting.
 - A selection turns as one about a pivot that stays put, in the plane the rings draw, and a turn
   that would leave the buildable area is refused rather than half-made.
-- Arrow keys nudge the way they point on screen, whichever side the camera is on.
 - Middle-click duplicates; a box is drawn with Shift+drag or with both buttons held.
 - Undo finds its parts by what they are rather than by an id captured when the command was built,
   which is what stops a second undo duplicating a part.
@@ -58,8 +66,10 @@ that a wrong assembly is harder to build than a right one.
 **Keyboard and mouse**
 
 - Every shortcut listed in one panel, and every one of them rebindable, kept between sessions.
-- The mouse gestures written down beside a mouse that fills in the button you are holding.
-- A log, behind a switch, of every press and what the viewport made of it.
+- The mouse gestures written down beside a mouse that fills in the button you are holding,
+  and a mouse in the corner of the view naming what each button does where the pointer stands.
+- A log of every press and what the viewport made of it, kept out of the app until a
+  session needs it (`__gestures.on()`).
 
 **Underneath**
 

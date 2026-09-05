@@ -67,6 +67,7 @@ import {
 } from "../assembly/gravity";
 import {
   restoreCustomParts,
+  createPrimitivePart,
   importModelFile,
   isCustomPart,
   getEmbeddedCustomParts,
@@ -75,7 +76,15 @@ import {
 import { encodeAssemblyToHash, decodeAssemblyFromHash, hasCustomParts } from "../sharing/url-sharing";
 import { ACTIONS, actionOf, comboOf, conflictOf, isReserved, keysOf, resetKeys, setKeys } from "../input/keybindings";
 import { GestureLog } from "./GestureLog";
-import { buttonsLabel, gestureLogIsOn, logGesture, subscribeGestureLog } from "../debug/gesture-log";
+import {
+  buttonsLabel,
+  clearGestureLog,
+  gestureLog,
+  gestureLogIsOn,
+  logGesture,
+  setGestureLogOn,
+  subscribeGestureLog,
+} from "../debug/gesture-log";
 
 /** True for an element that owns its own copy/paste/undo behaviour. */
 function isTextEntry(target: EventTarget | null): boolean {
@@ -138,6 +147,7 @@ assembly.subscribe(() => {
 };
 (window as any).__importSTL = importModelFile; // backward compat for e2e
 (window as any).__importModel = importModelFile;
+(window as any).__createShape = createPrimitivePart;
 (window as any).__computeGroundLift = computeGroundLift;
 (window as any).__collision = {
   detectCollidingPartIds,
@@ -158,6 +168,17 @@ assembly.subscribe(() => {
   placementAtPoint,
   supportHookupIsSound,
   hookupAxisAt,
+};
+/**
+ * The gesture log, for a session that needs one: `__gestures.on()` in the console
+ * brings up the list, `__gestures.entries()` reads it out. Not offered in the app —
+ * see src/debug/gesture-log.ts.
+ */
+(window as any).__gestures = {
+  on: () => setGestureLogOn(true),
+  off: () => setGestureLogOn(false),
+  clear: clearGestureLog,
+  entries: gestureLog,
 };
 (window as any).__keys = {
   ACTIONS,

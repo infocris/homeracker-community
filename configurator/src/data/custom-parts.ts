@@ -13,6 +13,7 @@ import {
   type CustomPartMeta,
 } from "./custom-parts-storage";
 import type { EmbeddedCustomPart } from "../types";
+import { type PrimitiveDimensions, geometryToBinarySTL, primitiveGeometry, primitiveName } from "./primitives";
 
 const stlLoader = new STLLoader();
 
@@ -142,6 +143,24 @@ export async function replaceCustomPart(defId: string, file: File): Promise<void
   notify();
   persistMeta();
   await saveSTLBuffer(defId, buffer);
+}
+
+/**
+ * Give a custom part another name.
+ *
+ * The name is all that changes: the id stays, so every placed instance stays where it
+ * is, and the geometry is not touched. A blank name is refused rather than stored —
+ * a part with no name cannot be picked out of a catalog.
+ */
+export function renameCustomPart(defId: string, name: string): void {
+  const trimmed = name.trim();
+  if (!trimmed) return;
+  const idx = customDefinitions.findIndex((d) => d.id === defId);
+  if (idx === -1 || customDefinitions[idx].name === trimmed) return;
+
+  customDefinitions[idx] = { ...customDefinitions[idx], name: trimmed };
+  notify();
+  persistMeta();
 }
 
 /** Delete a custom part from the library (geometry store, definitions, and persistence) */
@@ -449,6 +468,22 @@ async function registerCustomPart(
   persistMeta();
 
   return def;
+}
+
+/**
+ * Register a shape drawn in the app — a box, a cylinder — as a custom part.
+ *
+ * It goes in as an STL because that is the form every custom part is kept in: the same
+ * registration, the same voxel footprint, the same IndexedDB row, the same copy
+ * embedded in a save file. From here on it is a custom part like an imported one, and
+ * nothing downstream needs to know it was drawn rather than imported.
+ */
+export async function createPrimitivePart(dimensions: PrimitiveDimensions, name?: string): Promise<PartDefinition> {
+  const geometry = primitiveGeometry(dimensions);
+  const buffer = geometryToBinarySTL(geometry);
+  // Parsed back rather than kept: the loader is what every other custom part's
+  // geometry has been through, down to the attributes it ends up with
+  return registerCustomPart(name?.trim() || primitiveName(dimensions), "stl", stlLoader.parse(buffer), buffer);
 }
 
 /**

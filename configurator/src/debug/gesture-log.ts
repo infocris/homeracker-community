@@ -7,6 +7,10 @@
  * exactly alike. The log says which, in the app's own words.
  *
  * Off by default and free when off: `logGesture` returns before it builds anything.
+ *
+ * No switch in the app: it is turned on from the console — `__gestures.on()` — and the
+ * list then appears beside the bill of materials, with its own way back off. A button
+ * for it would be one more thing in the way of everybody who is not debugging.
  */
 
 export interface GestureEntry {

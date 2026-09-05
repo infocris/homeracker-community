@@ -320,6 +320,47 @@
     flex: 1;
   }
 
+  /* Renaming happens in place: the card gives way to the field, and the name it holds
+     is the only thing about the part that changes */
+  .catalog-item-rename {
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: inherit;
+    font-size: 11px;
+    outline: none;
+  }
+
+  .catalog-item-rename-btn {
+    position: absolute;
+    top: 2px;
+    right: 56px;
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: #7a6b3a;
+    color: #fff;
+    font-size: 10px;
+    line-height: 16px;
+    text-align: center;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .catalog-item-wrapper:hover .catalog-item-rename-btn {
+    opacity: 1;
+  }
+
+  .catalog-item-rename-btn:hover {
+    filter: brightness(1.2);
+  }
+
   .catalog-item-download {
     position: absolute;
     top: 2px;
@@ -1295,6 +1336,93 @@
   color: var(--text-secondary);
 }
 
+/* New shape: a box or a cylinder to the user's own measurements */
+.shape-dialog {
+  width: 300px;
+}
+
+.shape-kinds {
+  display: flex;
+  gap: 6px;
+}
+
+.shape-kind {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.shape-kind:hover {
+  border-color: var(--accent);
+}
+
+.shape-kind--on {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: #1a1a2e;
+  font-weight: 600;
+}
+
+.shape-field {
+  display: grid;
+  grid-template-columns: 72px 1fr 24px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.shape-field input {
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: inherit;
+  font-size: 12px;
+}
+
+.shape-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.shape-unit {
+  color: var(--text-secondary);
+}
+
+.shape-field--name {
+  grid-template-columns: 72px 1fr;
+}
+
+.shape-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.shape-create {
+  padding: 6px 14px;
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  background: var(--accent);
+  color: #1a1a2e;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.shape-create:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 /* Shortcuts */
 .keybindings {
   width: 520px;
@@ -1477,10 +1605,7 @@
  * which one and what that button does here.
  */
 .viewport-mouse {
-  position: absolute;
-  right: 16px;
-  bottom: 20px;
-  z-index: 6;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1506,9 +1631,44 @@
   background: rgba(0, 0, 0, 0.6);
 }
 
-.viewport-mouse-label {
-  color: var(--accent);
+.viewport-mouse-hints {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  text-align: left;
+}
+
+.viewport-mouse-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   white-space: nowrap;
+  color: var(--text-secondary);
+}
+
+.viewport-mouse:hover .viewport-mouse-hint,
+.viewport-mouse--held .viewport-mouse-hint {
+  color: var(--text-primary);
+}
+
+/* The row for the button actually held reads as the one being answered */
+.viewport-mouse-hint--held {
+  color: var(--accent);
+}
+
+.viewport-mouse--held .viewport-mouse-hint--held {
+  color: var(--accent);
+}
+
+.viewport-mouse-button {
+  min-width: 22px;
+  padding: 1px 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 9px;
+  font-weight: 600;
+  text-align: center;
+  color: inherit;
 }
 
 /* The gestures on the left, one mouse on the right answering the hand */
@@ -1645,10 +1805,20 @@
   pointer-events: none;
 }
 
+/* The toolbelt and the mouse share a row: the two used to be anchored to their own
+   corners, and a toolbelt that wrapped ran straight into the mouse */
+.viewport-bottom-row {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding-right: 16px;
+}
+
 .viewport-toolbelt {
   /* Clear of the axis gizmo the scene draws in this corner */
   margin-left: 120px;
-  max-width: calc(100% - 140px);
   display: flex;
   align-items: center;
   gap: 8px;

@@ -68,8 +68,8 @@ import {
   saveLightSettings,
 } from "./ShadowSettings";
 import { KeyBindingsPanel } from "./KeyBindingsPanel";
-import { MouseGlyph, nameForButtons, useHeldButtons } from "./MouseGlyph";
-import { buttonsLabel, gestureLogIsOn, logGesture, setGestureLogOn, subscribeGestureLog } from "../debug/gesture-log";
+import { type MouseButton, MouseGlyph, sameButtons, useHeldButtons } from "./MouseGlyph";
+import { buttonsLabel, logGesture } from "../debug/gesture-log";
 import type { ActionId } from "../input/actions";
 import { actionOf, bindings, comboLabel, keyLabel, subscribeBindings } from "../input/keybindings";
 import {
@@ -1430,17 +1430,81 @@ function GroupOutline({ min, max }: { min: GridPosition; max: GridPosition }) {
  * doubles as the way into the full list, which is where the rest of them are written
  * down.
  */
-function MouseIndicator({ onOpenShortcuts }: { onOpenShortcuts: () => void }) {
+/** What each button would do right now, in as many words as a corner will take */
+export interface MouseHints {
+  left?: string;
+  middle?: string;
+  right?: string;
+  /** Both together, where they mean something of their own */
+  both?: string;
+}
+
+/**
+ * What the buttons do where the pointer is standing.
+ *
+ * The same button means four or five things in this viewport depending on what is
+ * under it and what is in hand, and none of them are written anywhere on screen. Read
+ * out of the same state the handlers act on, so the corner cannot promise something
+ * the click will not do.
+ */
+function mouseHintsFor(
+  mode: InteractionMode,
+  dragState: DragState | null,
+  drawing: boolean,
+  overPart: boolean,
+): MouseHints {
+  if (dragState) {
+    return { left: "Release to drop", right: "Hold for height", middle: "—" };
+  }
+  if (drawing) return { left: "Release to draw the bar", right: "Cancel" };
+  switch (mode.type) {
+    case "place":
+      return { left: "Click to place", right: "Cancel", middle: "—" };
+    case "paste":
+      return { left: "Click to paste", right: "Cancel", middle: "—" };
+    case "draw":
+      return { left: "Drag to draw a bar", right: "Cancel", middle: "—" };
+    default:
+      return overPart
+        ? {
+            left: "Select · drag to move it about",
+            middle: "Duplicate",
+            right: "Select · drag to move it in height",
+            both: "Selection box",
+          }
+        : { left: "Turn the view", middle: "Pan the view", right: "Pan · a click deselects", both: "Selection box" };
+  }
+}
+
+const HINT_ROWS: { key: keyof MouseHints; label: string; buttons: MouseButton[] }[] = [
+  { key: "left", label: "L", buttons: ["left"] },
+  { key: "middle", label: "M", buttons: ["middle"] },
+  { key: "right", label: "R", buttons: ["right"] },
+  { key: "both", label: "L+R", buttons: ["left", "right"] },
+];
+
+function MouseIndicator({ hints, onOpenShortcuts }: { hints: MouseHints; onOpenShortcuts: () => void }) {
   const held = useHeldButtons();
+  const rows = HINT_ROWS.filter((row) => hints[row.key] && hints[row.key] !== "—");
   return (
     <button
       type="button"
       className={`viewport-mouse${held.length > 0 ? " viewport-mouse--held" : ""}`}
       onClick={onOpenShortcuts}
-      title="What the mouse does here — click for the whole list"
+      title="What the mouse does where it is standing — click for the whole list"
     >
-      <MouseGlyph buttons={held} size={22} />
-      {held.length > 0 && <span className="viewport-mouse-label">{nameForButtons(held)}</span>}
+      <MouseGlyph buttons={held} size={26} />
+      <span className="viewport-mouse-hints">
+        {rows.map((row) => (
+          <span
+            key={row.key}
+            className={`viewport-mouse-hint${sameButtons(held, row.buttons) ? " viewport-mouse-hint--held" : ""}`}
+          >
+            <span className="viewport-mouse-button">{row.label}</span>
+            {hints[row.key]}
+          </span>
+        ))}
+      </span>
     </button>
   );
 }
@@ -3417,7 +3481,6 @@ export function ViewportCanvas(props: ViewportProps) {
    * both rebuilt the moment one is changed.
    */
   const keys = useSyncExternalStore(subscribeBindings, bindings);
-  const logging = useSyncExternalStore(subscribeGestureLog, gestureLogIsOn);
 
   useEffect(() => {
     saveLightSettings(light);
@@ -4452,135 +4515,133 @@ export function ViewportCanvas(props: ViewportProps) {
             {hintText}
           </button>
         )}
-        <div className="viewport-toolbelt">
-          <button
-            className={`viewport-shadow-toggle${light.shadows ? " viewport-mirror-toggle--on" : ""}`}
-            type="button"
-            onClick={() => setLightPanelOpen(true)}
-            title="Lighting and shadow settings"
-          >
-            Shadows
-          </button>
-          {/*
+        <div className="viewport-bottom-row">
+          <div className="viewport-toolbelt">
+            <button
+              className={`viewport-shadow-toggle${light.shadows ? " viewport-mirror-toggle--on" : ""}`}
+              type="button"
+              onClick={() => setLightPanelOpen(true)}
+              title="Lighting and shadow settings"
+            >
+              Shadows
+            </button>
+            {/*
           The working level is moved while building, not configured once, so it gets a
           control of its own rather than a row inside a panel: one press per cell, and
           the readout doubles as the way back to the ground.
         */}
-          <div className="viewport-level">
+            <div className="viewport-level">
+              <button
+                type="button"
+                className="viewport-level-step"
+                // Read the live value, not this render's: presses in quick succession would
+                // otherwise all compute from the same stale number and move it once
+                onClick={() => setWorkspace({ level: getWorkspace().level - 1 })}
+                disabled={workspace.level <= 0}
+                title="Lower the working level by one cell"
+              >
+                −
+              </button>
+              <button
+                type="button"
+                className="viewport-level-readout"
+                onClick={() => setWorkspace({ level: 0 })}
+                title={
+                  workspace.level > 0 ? "Put the working level back on the ground" : "The working level is the ground"
+                }
+              >
+                {workspace.level === 0
+                  ? "Level: ground"
+                  : `Level: ${workspace.level} · ${Math.round((workspace.level * BASE_UNIT) / 10)} cm`}
+              </button>
+              <button
+                type="button"
+                className="viewport-level-step"
+                onClick={() => setWorkspace({ level: getWorkspace().level + 1 })}
+                disabled={workspace.level >= workspace.height}
+                title="Raise the working level by one cell"
+              >
+                +
+              </button>
+              <button
+                type="button"
+                className="viewport-level-step"
+                onClick={() => setLevelPanelOpen((v) => !v)}
+                title="How solid the level looks"
+              >
+                ⋯
+              </button>
+              {levelPanelOpen && (
+                <div className="viewport-level-panel" role="dialog" aria-label="Working level">
+                  <label className="shadow-settings-row">
+                    <span className="shadow-settings-label">Opacity</span>
+                    <input
+                      type="range"
+                      min={WORKSPACE_LIMITS.levelOpacity.min}
+                      max={WORKSPACE_LIMITS.levelOpacity.max}
+                      step={0.02}
+                      value={workspace.levelOpacity}
+                      onChange={(e) => setWorkspace({ levelOpacity: Number(e.target.value) })}
+                    />
+                    <span className="shadow-settings-value">{Math.round(workspace.levelOpacity * 100)}%</span>
+                  </label>
+                </div>
+              )}
+            </div>
             <button
+              className="viewport-workspace-toggle"
               type="button"
-              className="viewport-level-step"
-              // Read the live value, not this render's: presses in quick succession would
-              // otherwise all compute from the same stale number and move it once
-              onClick={() => setWorkspace({ level: getWorkspace().level - 1 })}
-              disabled={workspace.level <= 0}
-              title="Lower the working level by one cell"
+              onClick={() => setWorkspacePanelOpen(true)}
+              title="Size of the buildable area"
             >
-              −
+              Workspace
             </button>
             <button
+              className="viewport-workspace-toggle"
               type="button"
-              className="viewport-level-readout"
-              onClick={() => setWorkspace({ level: 0 })}
-              title={
-                workspace.level > 0 ? "Put the working level back on the ground" : "The working level is the ground"
-              }
+              onClick={() => setShortcutsOpen(true)}
+              title={`Every keyboard shortcut, and where to change them (${keyLabel("shortcuts")})`}
             >
-              {workspace.level === 0
-                ? "Level: ground"
-                : `Level: ${workspace.level} · ${Math.round((workspace.level * BASE_UNIT) / 10)} cm`}
+              Keys
             </button>
             <button
+              className={`viewport-connectors-toggle${!showRotationGuides ? " viewport-mirror-toggle--on" : ""}`}
               type="button"
-              className="viewport-level-step"
-              onClick={() => setWorkspace({ level: getWorkspace().level + 1 })}
-              disabled={workspace.level >= workspace.height}
-              title="Raise the working level by one cell"
+              onClick={() => setShowRotationGuides((v) => !v)}
+              title="The rotation rings around a selection — the keys turn it either way"
             >
-              +
+              Guides: {showRotationGuides ? "On" : "Off"}
             </button>
             <button
+              className={`viewport-connectors-toggle${!showConnectors ? " viewport-mirror-toggle--on" : ""}`}
               type="button"
-              className="viewport-level-step"
-              onClick={() => setLevelPanelOpen((v) => !v)}
-              title="How solid the level looks"
+              onClick={() => setShowConnectors((v) => !v)}
+              title="Hide the connectors to read the run of the bars on their own"
             >
-              ⋯
+              Connectors: {showConnectors ? "On" : "Off"}
             </button>
-            {levelPanelOpen && (
-              <div className="viewport-level-panel" role="dialog" aria-label="Working level">
-                <label className="shadow-settings-row">
-                  <span className="shadow-settings-label">Opacity</span>
-                  <input
-                    type="range"
-                    min={WORKSPACE_LIMITS.levelOpacity.min}
-                    max={WORKSPACE_LIMITS.levelOpacity.max}
-                    step={0.02}
-                    value={workspace.levelOpacity}
-                    onChange={(e) => setWorkspace({ levelOpacity: Number(e.target.value) })}
-                  />
-                  <span className="shadow-settings-value">{Math.round(workspace.levelOpacity * 100)}%</span>
-                </label>
-              </div>
-            )}
+            <button
+              className={`viewport-mirror-toggle${mirrorMinimap ? " viewport-mirror-toggle--on" : ""}`}
+              type="button"
+              onClick={() => setMirrorMinimap((v) => !v)}
+              title="Minimap showing the camera mirrored through the ground plane — the underside"
+            >
+              Mirror
+            </button>
+            <button
+              className={`viewport-camera-toggle ${isOrthographic ? "viewport-camera-toggle--ortho" : "viewport-camera-toggle--persp"}`}
+              type="button"
+              onClick={handleToggleCameraMode}
+              title="Toggle perspective/orthographic camera"
+            >
+              <span className="viewport-camera-toggle__thumb">{isOrthographic ? <OrthoIcon /> : <PerspIcon />}</span>
+              <span className="viewport-camera-toggle__label">{isOrthographic ? "ORTHO" : "PERSP"}</span>
+            </button>
           </div>
-          <button
-            className="viewport-workspace-toggle"
-            type="button"
-            onClick={() => setWorkspacePanelOpen(true)}
-            title="Size of the buildable area"
-          >
-            Workspace
-          </button>
-          <button
-            className="viewport-workspace-toggle"
-            type="button"
-            onClick={() => setShortcutsOpen(true)}
-            title={`Every keyboard shortcut, and where to change them (${keyLabel("shortcuts")})`}
-          >
-            Keys
-          </button>
-          <button
-            className={`viewport-connectors-toggle${logging ? " viewport-mirror-toggle--on" : ""}`}
-            type="button"
-            onClick={() => setGestureLogOn(!logging)}
-            title="Write every press, gesture and change of mode into a list on the right"
-          >
-            Gestures: {logging ? "On" : "Off"}
-          </button>
-          <button
-            className={`viewport-connectors-toggle${!showRotationGuides ? " viewport-mirror-toggle--on" : ""}`}
-            type="button"
-            onClick={() => setShowRotationGuides((v) => !v)}
-            title="The rotation rings around a selection — the keys turn it either way"
-          >
-            Guides: {showRotationGuides ? "On" : "Off"}
-          </button>
-          <button
-            className={`viewport-connectors-toggle${!showConnectors ? " viewport-mirror-toggle--on" : ""}`}
-            type="button"
-            onClick={() => setShowConnectors((v) => !v)}
-            title="Hide the connectors to read the run of the bars on their own"
-          >
-            Connectors: {showConnectors ? "On" : "Off"}
-          </button>
-          <button
-            className={`viewport-mirror-toggle${mirrorMinimap ? " viewport-mirror-toggle--on" : ""}`}
-            type="button"
-            onClick={() => setMirrorMinimap((v) => !v)}
-            title="Minimap showing the camera mirrored through the ground plane — the underside"
-          >
-            Mirror
-          </button>
-          <button
-            className={`viewport-camera-toggle ${isOrthographic ? "viewport-camera-toggle--ortho" : "viewport-camera-toggle--persp"}`}
-            type="button"
-            onClick={handleToggleCameraMode}
-            title="Toggle perspective/orthographic camera"
-          >
-            <span className="viewport-camera-toggle__thumb">{isOrthographic ? <OrthoIcon /> : <PerspIcon />}</span>
-            <span className="viewport-camera-toggle__label">{isOrthographic ? "ORTHO" : "PERSP"}</span>
-          </button>
+          <MouseIndicator
+            hints={mouseHintsFor(props.mode, dragState, !!drawDrag, !!hoveredPartId)}
+            onOpenShortcuts={() => setShortcutsOpen(true)}
+          />
         </div>
       </div>
       {lightPanelOpen && (
@@ -4589,7 +4650,6 @@ export function ViewportCanvas(props: ViewportProps) {
       {workspacePanelOpen && (
         <WorkspaceSettings size={workspace} onChange={setWorkspace} onClose={() => setWorkspacePanelOpen(false)} />
       )}
-      <MouseIndicator onOpenShortcuts={() => setShortcutsOpen(true)} />
       {shortcutsOpen && <KeyBindingsPanel onClose={() => setShortcutsOpen(false)} />}
       {boxSelectRect && (
         <div
