@@ -79,12 +79,15 @@ test.describe("Placement mode", () => {
         activeName: activeItem?.querySelector(".catalog-item-name")?.textContent?.trim() ?? null,
         hintVisible: !!hint,
         hintText: hint?.textContent?.trim() ?? null,
+        mouseHints: [...document.querySelectorAll(".viewport-mouse-hint")].map((r) => r.textContent?.trim() ?? ""),
       };
     });
 
     expect(afterClick.activeName).toBe("3D 6-Way");
+    // The corner says what the keys do; the mouse below it says what the buttons do
     expect(afterClick.hintVisible).toBe(true);
-    expect(afterClick.hintText).toContain("Click to place");
+    expect(afterClick.hintText).toContain("rotate");
+    expect(afterClick.mouseHints.join(" ")).toContain("Click to place");
   });
 
   test("Escape exits placement mode", async ({ appPage: page }) => {

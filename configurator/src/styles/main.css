@@ -780,24 +780,38 @@
     z-index: 10;
   }
 
+  /* The keys, in the corner above the mouse: one line each */
   .viewport-hint {
-    align-self: center;
-    max-width: calc(100% - 32px);
-    background: rgba(0, 0, 0, 0.7);
-    border: 1px solid transparent;
-    color: var(--text-primary);
-    padding: 8px 16px;
-    border-radius: 6px;
-    font-family: inherit;
-    font-size: 12px;
-    text-align: center;
-    /* It reads out shortcuts, so it is also the way to the list of them */
-    pointer-events: auto;
-    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding-bottom: 4px;
+    margin-bottom: 2px;
+    border-bottom: 1px solid var(--border);
+    text-align: left;
   }
 
-  .viewport-hint:hover {
-    border-color: var(--accent);
+  .viewport-hint-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    color: var(--text-secondary);
+  }
+
+  .viewport-mouse:hover .viewport-hint-row {
+    color: var(--text-primary);
+  }
+
+  .viewport-key {
+    min-width: 34px;
+    padding: 1px 4px;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+    text-align: center;
+    color: inherit;
   }
 
   .collision-computing-indicator {
@@ -1607,8 +1621,9 @@
 .viewport-mouse {
   flex: 0 0 auto;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
   padding: 6px 10px;
   border: 1px solid transparent;
   border-radius: 6px;
@@ -1629,6 +1644,12 @@
 .viewport-mouse--held {
   opacity: 1;
   background: rgba(0, 0, 0, 0.6);
+}
+
+.viewport-mouse-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .viewport-mouse-hints {

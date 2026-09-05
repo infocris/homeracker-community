@@ -1483,7 +1483,28 @@ const HINT_ROWS: { key: keyof MouseHints; label: string; buttons: MouseButton[] 
   { key: "both", label: "L+R", buttons: ["left", "right"] },
 ];
 
-function MouseIndicator({ hints, onOpenShortcuts }: { hints: MouseHints; onOpenShortcuts: () => void }) {
+/** One key and what it does, for the corner's upper half */
+export interface KeyHint {
+  key: string;
+  action: string;
+}
+
+/**
+ * The controls, where the pointer is standing: the keys above, the buttons below.
+ *
+ * One line apiece, which is what makes them readable at a glance — the same thing said
+ * in a sentence along the foot of the view took a moment's reading and was skipped. The
+ * whole corner is the way into the full list.
+ */
+function ControlsCorner({
+  keyHints,
+  hints,
+  onOpenShortcuts,
+}: {
+  keyHints: KeyHint[];
+  hints: MouseHints;
+  onOpenShortcuts: () => void;
+}) {
   const held = useHeldButtons();
   const rows = HINT_ROWS.filter((row) => hints[row.key] && hints[row.key] !== "—");
   return (
@@ -1491,19 +1512,31 @@ function MouseIndicator({ hints, onOpenShortcuts }: { hints: MouseHints; onOpenS
       type="button"
       className={`viewport-mouse${held.length > 0 ? " viewport-mouse--held" : ""}`}
       onClick={onOpenShortcuts}
-      title="What the mouse does where it is standing — click for the whole list"
+      title="What the keys and the buttons do here — click for the whole list"
     >
-      <MouseGlyph buttons={held} size={26} />
-      <span className="viewport-mouse-hints">
-        {rows.map((row) => (
-          <span
-            key={row.key}
-            className={`viewport-mouse-hint${sameButtons(held, row.buttons) ? " viewport-mouse-hint--held" : ""}`}
-          >
-            <span className="viewport-mouse-button">{row.label}</span>
-            {hints[row.key]}
-          </span>
-        ))}
+      {keyHints.length > 0 && (
+        <span className="viewport-hint">
+          {keyHints.map((hint) => (
+            <span className="viewport-hint-row" key={hint.action}>
+              <span className="viewport-key">{hint.key}</span>
+              {hint.action}
+            </span>
+          ))}
+        </span>
+      )}
+      <span className="viewport-mouse-row">
+        <MouseGlyph buttons={held} size={26} />
+        <span className="viewport-mouse-hints">
+          {rows.map((row) => (
+            <span
+              key={row.key}
+              className={`viewport-mouse-hint${sameButtons(held, row.buttons) ? " viewport-mouse-hint--held" : ""}`}
+            >
+              <span className="viewport-mouse-button">{row.label}</span>
+              {hints[row.key]}
+            </span>
+          ))}
+        </span>
       </span>
     </button>
   );
@@ -4400,36 +4433,52 @@ export function ViewportCanvas(props: ViewportProps) {
   }, []);
 
   /*
-   * The hint, spelled with the keys as they are bound right now — it used to name keys
-   * of its own (T, R, F) that nothing answered to. Clicking it opens the full list.
+   * What the keys do here, one line apiece, spelled with the keys as they are bound
+   * right now — the hint used to name keys of its own (T, R, F) that nothing answered
+   * to, and to say it all in one sentence along the foot of the view.
+   *
+   * Keys only: what the buttons do is the mouse's business, and the mouse below these
+   * lines answers for it. Said twice, in two places, in two wordings, is how the two
+   * come to disagree.
    */
   const turnKeys = `${keyLabel("turn-x")}/${keyLabel("turn-y")}/${keyLabel("turn-z")}`;
   const liftKeys = `${keyLabel("raise")}/${keyLabel("lower")}`;
   const nudgeKeys = `${keyLabel("nudge-left")}${keyLabel("nudge-right")}${keyLabel("nudge-forward")}${keyLabel("nudge-back")}`;
   const cancelKey = keyLabel("cancel");
 
-  let hintText: string | null = null;
+  let keyHints: KeyHint[] = [];
   if (dragState) {
     const dragDef = getPartDefinition(dragState.definitionId);
-    hintText =
-      dragDef?.category === "support"
-        ? `${turnKeys} rotate · ${keyLabel("orient")} orientation · ${liftKeys} raise/lower · Release to place · Right-click or ${cancelKey} cancel`
-        : `${turnKeys} rotate · ${liftKeys} raise/lower · Release to place · Right-click or ${cancelKey} cancel`;
+    keyHints = [
+      { key: turnKeys, action: "rotate" },
+      ...(dragDef?.category === "support" ? [{ key: keyLabel("orient"), action: "orientation" }] : []),
+      { key: liftKeys, action: "raise / lower" },
+      { key: cancelKey, action: "cancel" },
+    ];
   } else if (props.mode.type === "place") {
-    hintText = isPlacingSupport
-      ? `Click to place · ${turnKeys} rotate · ${keyLabel("orient")} orientation · ${liftKeys} raise/lower · Right-click or ${cancelKey} cancel`
-      : `Click to place · ${turnKeys} rotate · ${liftKeys} raise/lower · Right-click or ${cancelKey} cancel`;
+    keyHints = [
+      { key: turnKeys, action: "rotate" },
+      ...(isPlacingSupport ? [{ key: keyLabel("orient"), action: "orientation" }] : []),
+      { key: liftKeys, action: "raise / lower" },
+      { key: cancelKey, action: "cancel" },
+    ];
   } else if (props.mode.type === "draw") {
-    hintText =
-      props.mode.axis === "vertical"
-        ? `Click a cell and drag up to stand a support · Right-click or ${cancelKey} cancel`
-        : `Drag across the ground to lay down a support · Right-click or ${cancelKey} cancel`;
-  } else if (props.mode.type === "select" && props.selectedPartIds.size > 0) {
-    hintText = selectedResizable
-      ? `Drag face handles to resize · Suggested parts appear on the right · Middle-click to duplicate · ${keyLabel("delete")} delete · Right-click or ${cancelKey} deselect`
-      : `${nudgeKeys} nudge, Shift for finer · ${liftKeys} up and down · ${turnKeys} turn in the xz, xy and yz planes, Shift to reverse · ${keyLabel("copy")}/${keyLabel("paste")} copy/paste, middle-click duplicates · ${keyLabel("delete")} delete · Right-click or ${cancelKey} deselect`;
+    keyHints = [{ key: cancelKey, action: "cancel" }];
   } else if (props.mode.type === "paste") {
-    hintText = `Click to paste ${props.mode.clipboard.parts.length} part(s) · ${turnKeys} rotate · ${cancelKey} cancel`;
+    keyHints = [
+      { key: turnKeys, action: "rotate" },
+      { key: cancelKey, action: `cancel · ${props.mode.clipboard.parts.length} part(s) on the cursor` },
+    ];
+  } else if (props.selectedPartIds.size > 0) {
+    keyHints = [
+      { key: nudgeKeys, action: "nudge · Shift for finer" },
+      { key: liftKeys, action: "up / down" },
+      { key: turnKeys, action: "rotate · Shift to reverse" },
+      ...(selectedResizable ? [{ key: keyLabel("orient"), action: "orientation" }] : []),
+      { key: `${keyLabel("copy")}/${keyLabel("paste")}`, action: "copy / paste" },
+      { key: keyLabel("delete"), action: "delete" },
+      { key: cancelKey, action: "deselect" },
+    ];
   }
 
   return (
@@ -4505,16 +4554,6 @@ export function ViewportCanvas(props: ViewportProps) {
         ))}
       {/* One flexible row: fixed left offsets could not take another control */}
       <div className="viewport-bottom">
-        {hintText && (
-          <button
-            type="button"
-            className="viewport-hint"
-            onClick={() => setShortcutsOpen(true)}
-            title="Every shortcut, and where to change them"
-          >
-            {hintText}
-          </button>
-        )}
         <div className="viewport-bottom-row">
           <div className="viewport-toolbelt">
             <button
@@ -4638,7 +4677,8 @@ export function ViewportCanvas(props: ViewportProps) {
               <span className="viewport-camera-toggle__label">{isOrthographic ? "ORTHO" : "PERSP"}</span>
             </button>
           </div>
-          <MouseIndicator
+          <ControlsCorner
+            keyHints={keyHints}
             hints={mouseHintsFor(props.mode, dragState, !!drawDrag, !!hoveredPartId)}
             onOpenShortcuts={() => setShortcutsOpen(true)}
           />
